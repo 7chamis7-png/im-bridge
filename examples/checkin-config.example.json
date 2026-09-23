@@ -1,0 +1,10 @@
+{
+  "minIntervalMs": 2700000,
+  "maxIntervalMs": 3300000,
+  "branches": { "heart": 0.25, "cave": 0.30, "fun": 0.30, "egg": 0.15 },
+  "branchesSleep": { "heart": 0.10, "cave": 0.18, "fun": 0.35, "egg": 0.27, "owner_sleep": 0.10 },
+  "ownerSleep": { "from": 0, "to": 7 },
+  "eggs": { "notes": 0.30, "oldquote": 0.20, "deeptalk": 0.25, "dare": 0.20, "hidden": 0.05 },
+  "funMenu": { "min": 3, "max": 5 },
+  "nightHours": { "from": 22, "to": 6 }
+}

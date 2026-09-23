@@ -1,0 +1,17 @@
+{
+  "name": "im-bridge",
+  "version": "0.1.0",
+  "description": "Bridge Telegram / WeChat / iMessage and other IM channels to a Claude Code (Agent SDK) session.",
+  "license": "MIT",
+  "scripts": {
+    "test": "npm run test:runtime && npm run test:gate && npm run test:cli-host && npm run test:tools",
+    "test:runtime": "node --test test/runtime/*.test.js",
+    "test:gate": "bash test/run-gate.sh",
+    "test:cli-host": "node test/cli-host/split.js",
+    "test:tools": "node --test tools/telegram/test.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.278",
+    "spectrum-ts": "^12.8.0"
+  }
+}

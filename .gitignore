@@ -1,0 +1,11 @@
+node_modules/
+.env
+.env.*
+!.env.example
+.im-bridge/
+data/
+*.log
+__pycache__/
+*.pyc
+*.bak*
+.DS_Store
