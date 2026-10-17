@@ -52,6 +52,8 @@ function pruneIngress(file) {
 }
 
 function createCliHost({ socketPath, claudePath, ingressPath, scope = 'box', stopGraceMs = 3000,
+  // Recreate a runtime on enqueue if the host restarted before the box called ensure again.
+  fallbackEnsure = null,
   // Injectable for tests, so the wiring layer can be tested without spawning a CLI.
   runtimeFactory = createRuntime,
 }) {
@@ -233,8 +235,14 @@ function createCliHost({ socketPath, claudePath, ingressPath, scope = 'box', sto
         complete: missed !== null,
       };
     },
-    // Pass through as-is: the local runtime signature is enqueue({ message, origin, uuid })
-    enqueue: (args) => requireLive().rt.enqueue(args.payload),
+    // Pass through as-is: the local runtime signature is enqueue({ message, origin, uuid }).
+    enqueue: async (args) => {
+      if (!live) {
+        if (launching) await launching.catch(() => {});
+        if (!live && typeof fallbackEnsure === 'function') await ensure(fallbackEnsure());
+      }
+      return requireLive().rt.enqueue(args.payload);
+    },
     start: () => requireLive().rt.start(),
     stop: () => (live ? live.rt.stop() : null),
     close: () => stopLive('box requested close'),

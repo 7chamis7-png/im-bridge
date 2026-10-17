@@ -7,7 +7,7 @@
     "test": "npm run test:runtime && npm run test:gate && npm run test:cli-host && npm run test:tools",
     "test:runtime": "node --test test/runtime/*.test.js",
     "test:gate": "bash test/run-gate.sh",
-    "test:cli-host": "node test/cli-host/split.js",
+    "test:cli-host": "node test/cli-host/split.js && node --test test/cli-host/codex-image.test.js",
     "test:tools": "node --test tools/telegram/test.js"
   },
   "dependencies": {

@@ -7,8 +7,9 @@
 ## English
 
 **im-bridge** connects instant-messaging channels (Telegram, WeChat, iMessage, a
-voice-call leg, …) to a single long-running **Claude Code** session driven
-through the official **Claude Agent SDK**. Messages from any channel become
+voice-call leg, …) to a single long-running **Claude Code or Codex** session.
+Claude uses the official **Claude Agent SDK**; Codex uses a persistent
+`codex app-server`. Messages from any channel become
 turns in one conversation; the agent answers through MCP tools (`reply`,
 `send_image`, `send_voice`, `react`, …) and the bridge decides where and how
 each reply is delivered.
@@ -40,7 +41,7 @@ restarted without interrupting the others.
 
 | Process | Entry | Role |
 |---|---|---|
-| `im-cli` | `cli-host/main.js` | Owns the Claude CLI via the Agent SDK. Keeps an ingress ledger so no turn is sent twice or lost across restarts. Serves `cli.sock`. |
+| `im-cli` | `cli-host/main.js` or `cli-host/codex-main.js` | Owns Claude via the Agent SDK or Codex via a persistent app-server. Keeps an ingress ledger so no turn is sent twice or lost across restarts. Codex persists its thread id and resumes it after restart. Serves `cli.sock`. |
 | `im-box` | `host/box-host.js` | Owns the session: binding → thread id (`sessions.json`), persona/opening injection, transcript trimming, and a journal of replies not yet acknowledged by the gate. Serves `box.sock`. |
 | `im-gate` | `src/host/main.js` (`GATE_BOX=remote`) | The bridge. Loads channel plugins whose config is present, validates inbound events, queues turns, routes and delivers replies, writes the cold log, exposes `tools.sock` for the MCP tool shim, and runs the watchdog (context high-water / auto rotate). |
 | `im-heart` | `src/host/heart-host.js` | Optional. Periodic "beats": idle check-ins and reminders, delivered as producer notes. |
@@ -71,7 +72,7 @@ are set; `GATE_LEG_<NAME>=off` disables one explicitly.
 ### Requirements
 
 - Node.js ≥ 20 (developed on 22)
-- The `claude` CLI installed and logged in
+- The `claude` CLI installed and logged in, or the `codex` CLI logged in with a ChatGPT subscription
 - Optional per leg: Python 3, `zstd`, `ffmpeg`, SQLCipher tooling, AT-SPI (WeChat); an
   iMessage provider (iMessage); ElevenLabs / OpenAI-compatible keys (voice, images, STT)
 
@@ -152,6 +153,21 @@ See `.env.example` for a template. Data lives under `IM_BRIDGE_HOME`
 | `AGENT_CLI_STOP_GRACE_MS` | `3000` | Grace period when stopping the CLI |
 | `IM_BRIDGE_INGRESS_PATH`, `IM_BRIDGE_CLI_CWD`, `IM_BRIDGE_CLI_PATH`, `IM_BRIDGE_STREAM_TOKENS` | — | Low-level defaults for `runtime/index.js` |
 
+**Codex runtime (alternative im-cli)**
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `CODEX_COMMAND` | `codex` | Codex CLI executable |
+| `CODEX_MODEL` | account default | Codex model; kept independent from Claude `/model` choices |
+| `CODEX_HOME_DIR` | OS home | Home containing `.codex/auth.json` |
+| `CODEX_AUTH_FILE` | `$CODEX_HOME_DIR/.codex/auth.json` | Codex login file; only `auth_mode=chatgpt` is accepted |
+| `CODEX_ROOT` | `GATE_ROOT` | Codex state directory |
+| `CODEX_SOCKET` | `$GATE_ROOT/cli.sock` | CLI socket used by im-box |
+| `CODEX_INGRESS` | `$CODEX_ROOT/state/ingress.json` | Reliable ingress ledger |
+| `CODEX_THREAD_FILE` | `$CODEX_ROOT/state/codex-thread.json` | Persisted thread id used by `thread/resume` after restart |
+| `CODEX_APPROVAL_POLICY` | `never` | Approval policy passed to Codex app-server |
+| `CODEX_START_TIMEOUT_MS` / `CODEX_TURN_TIMEOUT_MS` | `60000` / `300000` | Start and per-turn timeouts |
+
 **Telegram leg**: `GATE_TELEGRAM_TOKEN` (required), `GATE_BOT_ID`, `GATE_BOT_USERNAME`,
 `GATE_STICKER_PACKS` (sticker book JSON), `GATE_STICKER_OWNER`, `GATE_STICKER_OWNERS` (`identity=pack,...`).
 
@@ -205,6 +221,8 @@ cp .env.example .env        # edit it
 set -a; . ./.env; set +a
 
 node cli-host/main.js                      # im-cli
+# Or, instead of the line above:
+node cli-host/codex-main.js                # im-cli backed by persistent Codex app-server
 node host/box-host.js                      # im-box
 GATE_BOX=remote node src/host/main.js      # im-gate   (add --check for a dry health check)
 node src/host/heart-host.js                # im-heart (optional)
@@ -240,7 +258,8 @@ MIT — see `LICENSE`.
 ## 中文
 
 **im-bridge** 把即时通讯渠道（Telegram、微信、iMessage、电话等）接到一个常驻的
-**Claude Code** 会话上，底层用官方 **Claude Agent SDK**。各渠道的消息都变成同一段对话里的轮次；
+**Claude Code 或 Codex** 会话上。Claude 使用官方 **Claude Agent SDK**，Codex 使用常驻的
+`codex app-server`。各渠道的消息都变成同一段对话里的轮次；
 agent 通过 MCP 工具（`reply`、`send_image`、`send_voice`、`react` 等）回复，由桥决定发到哪里、怎么发。
 
 ### 架构
@@ -250,7 +269,7 @@ agent 通过 MCP 工具（`reply`、`send_image`、`send_voice`、`react` 等）
 
 | 进程 | 入口 | 职责 |
 |---|---|---|
-| `im-cli` | `cli-host/main.js` | 通过 Agent SDK 持有 Claude CLI；用入站台账保证重启前后每一轮不丢不重。提供 `cli.sock`。 |
+| `im-cli` | `cli-host/main.js` 或 `cli-host/codex-main.js` | 通过 Agent SDK 持有 Claude，或通过常驻 app-server 持有 Codex；入站台账保证重启前后每一轮不丢不重。Codex 的 thread id 会落盘，重启后调用 `thread/resume`。提供 `cli.sock`。 |
 | `im-box` | `host/box-host.js` | 持有会话：绑定 → 线程号（`sessions.json`）、人格/开场注入、转录裁剪、未被桥确认的回复日志。提供 `box.sock`。 |
 | `im-gate` | `src/host/main.js`（`GATE_BOX=remote`） | 桥本体：按配置自动插上渠道插件，校验入站、排队、路由与投递回复、写冷层记录，给 MCP 工具壳提供 `tools.sock`，并运行守护（上下文水位/自动换会话）。 |
 | `im-heart` | `src/host/heart-host.js` | 可选。定时"心跳"：空闲问候、提醒，以 producer 笔记形式投递。 |
@@ -281,6 +300,8 @@ npm install
 cp .env.example .env && 编辑
 set -a; . ./.env; set +a
 node cli-host/main.js                      # im-cli
+# 或者用 Codex（与上一行二选一）：
+node cli-host/codex-main.js                # 常驻 Codex app-server
 node host/box-host.js                      # im-box
 GATE_BOX=remote node src/host/main.js      # im-gate（加 --check 只体检）
 node src/host/heart-host.js                # im-heart（可选）

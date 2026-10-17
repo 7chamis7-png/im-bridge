@@ -216,6 +216,14 @@ function createRemoteRuntime({
           catch {}
           lastSeq = info.lastSeq;
         }
+        // A restarted CLI host has no live runtime yet. Recreate it from the
+        // most recent ensure request instead of dropping the next turn.
+        if (lastEnsure && !info.hasCli) {
+          const again = await call('ensure', lastEnsure, { timeoutMs: 120_000 });
+          if (again && again.status) statusCache = { ...statusCache, ...again.status };
+          if (again && !again.reused) resetDone();
+          log('recreated runtime after CLI host reconnect');
+        }
       } catch (e) { warn('attach failed (continuing):', e.message); }
     });
 
