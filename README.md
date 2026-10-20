@@ -9,7 +9,8 @@
 **im-bridge** connects instant-messaging channels (Telegram, WeChat, iMessage, a
 voice-call leg, …) to a single long-running **Claude Code or Codex** session.
 Claude uses the official **Claude Agent SDK**; Codex uses a persistent
-`codex app-server`. Messages from any channel become
+`codex app-server`. An optional **DeepSeek** runtime (OpenAI-compatible chat
+completions API) can stand in for either. Messages from any channel become
 turns in one conversation; the agent answers through MCP tools (`reply`,
 `send_image`, `send_voice`, `react`, …) and the bridge decides where and how
 each reply is delivered.
@@ -41,7 +42,7 @@ restarted without interrupting the others.
 
 | Process | Entry | Role |
 |---|---|---|
-| `im-cli` | `cli-host/main.js` or `cli-host/codex-main.js` | Owns Claude via the Agent SDK or Codex via a persistent app-server. Keeps an ingress ledger so no turn is sent twice or lost across restarts. Codex persists its thread id and resumes it after restart. Serves `cli.sock`. |
+| `im-cli` | `cli-host/main.js`, `cli-host/codex-main.js` or `cli-host/deepseek-main.js` | Owns Claude via the Agent SDK, Codex via a persistent app-server, or DeepSeek via its HTTP API. Keeps an ingress ledger so no turn is sent twice or lost across restarts. Codex persists its thread id and resumes it after restart. Serves `cli.sock`. |
 | `im-box` | `host/box-host.js` | Owns the session: binding → thread id (`sessions.json`), persona/opening injection, transcript trimming, and a journal of replies not yet acknowledged by the gate. Serves `box.sock`. |
 | `im-gate` | `src/host/main.js` (`GATE_BOX=remote`) | The bridge. Loads channel plugins whose config is present, validates inbound events, queues turns, routes and delivers replies, writes the cold log, exposes `tools.sock` for the MCP tool shim, and runs the watchdog (context high-water / auto rotate). |
 | `im-heart` | `src/host/heart-host.js` | Optional. Periodic "beats": idle check-ins and reminders, delivered as producer notes. |
@@ -72,7 +73,8 @@ are set; `GATE_LEG_<NAME>=off` disables one explicitly.
 ### Requirements
 
 - Node.js ≥ 20 (developed on 22)
-- The `claude` CLI installed and logged in, or the `codex` CLI logged in with a ChatGPT subscription
+- The `claude` CLI installed and logged in, or the `codex` CLI logged in with a ChatGPT subscription,
+  or a DeepSeek API key (`DEEPSEEK_API_KEY`)
 - Optional per leg: Python 3, `zstd`, `ffmpeg`, SQLCipher tooling, AT-SPI (WeChat); an
   iMessage provider (iMessage); ElevenLabs / OpenAI-compatible keys (voice, images, STT)
 
@@ -168,6 +170,34 @@ See `.env.example` for a template. Data lives under `IM_BRIDGE_HOME`
 | `CODEX_APPROVAL_POLICY` | `never` | Approval policy passed to Codex app-server |
 | `CODEX_START_TIMEOUT_MS` / `CODEX_TURN_TIMEOUT_MS` | `60000` / `300000` | Start and per-turn timeouts |
 
+**DeepSeek runtime (alternative im-cli)**
+
+Calls the DeepSeek chat-completions API directly (no CLI is spawned). It keeps
+its own conversation file, separate from Claude's `sessions.json`, so switching
+back to Claude finds the old session untouched. A brand-new conversation is
+seeded from the tail of the cold log. Tools are the MCP servers the box passes
+in, plus local `Read` / `Edit` / `Write` / `Bash`; every call still goes through
+the box's permission check. Images are not supported. Note that this runtime is
+billed per token by the API provider.
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `DEEPSEEK_API_KEY` | — (required) | API key; read from the environment only, never written to disk |
+| `DEEPSEEK_BASE_URL` | `https://api.deepseek.com` | API root; an Anthropic-compatible `.../anthropic` root is mapped back to `/chat/completions` |
+| `DEEPSEEK_MODEL` | `deepseek-chat` | Model name; independent from Claude `/model` choices |
+| `DEEPSEEK_TIMEOUT_MS` | `90000` | Per-request timeout |
+| `DEEPSEEK_ROOT` | `$GATE_ROOT/deepseek` | State directory (ledger, `deepseek-thread.json`) |
+| `DEEPSEEK_SOCKET` | `$DEEPSEEK_ROOT/deepseek.sock` | Socket to listen on. Set to `$GATE_ROOT/cli.sock` to serve the box instead of the Claude im-cli |
+| `DEEPSEEK_INGRESS` | `$DEEPSEEK_ROOT/state/ingress.json` | Reliable ingress ledger |
+| `DEEPSEEK_SCOPE` | `deepseek` | Ledger scope |
+| `DEEPSEEK_CWD` | `GATE_WORKSPACE_ROOT` | Workspace (tool cwd; its `CLAUDE.md` and `.mcp.json` are read) |
+| `DEEPSEEK_SYSTEM_PROMPT` | `GATE_IDENTITY_INJECTION_FILE` / `GATE_SYSTEM_PROMPT_FILE` | System prompt file |
+| `DEEPSEEK_COLD_FILE` | — | Cold log used to seed a new conversation |
+| `DEEPSEEK_MCP_FILE` | — | MCP config to read when the box has not passed a server list |
+
+Try it without the box: `node cli-host/deepseek-ask.js "hello"` (refuses to
+connect to the box's own `cli.sock` unless `DEEPSEEK_ASK_FORCE=1`).
+
 **Telegram leg**: `GATE_TELEGRAM_TOKEN` (required), `GATE_BOT_ID`, `GATE_BOT_USERNAME`,
 `GATE_STICKER_PACKS` (sticker book JSON), `GATE_STICKER_OWNER`, `GATE_STICKER_OWNERS` (`identity=pack,...`).
 
@@ -223,6 +253,7 @@ set -a; . ./.env; set +a
 node cli-host/main.js                      # im-cli
 # Or, instead of the line above:
 node cli-host/codex-main.js                # im-cli backed by persistent Codex app-server
+# Or: DEEPSEEK_SOCKET="$GATE_ROOT/cli.sock" node cli-host/deepseek-main.js   # im-cli backed by DeepSeek API
 node host/box-host.js                      # im-box
 GATE_BOX=remote node src/host/main.js      # im-gate   (add --check for a dry health check)
 node src/host/heart-host.js                # im-heart (optional)
@@ -259,7 +290,8 @@ MIT — see `LICENSE`.
 
 **im-bridge** 把即时通讯渠道（Telegram、微信、iMessage、电话等）接到一个常驻的
 **Claude Code 或 Codex** 会话上。Claude 使用官方 **Claude Agent SDK**，Codex 使用常驻的
-`codex app-server`。各渠道的消息都变成同一段对话里的轮次；
+`codex app-server`。另有可选的 **DeepSeek** 运行时（OpenAI 兼容的 chat completions 接口），可替代二者之一。
+各渠道的消息都变成同一段对话里的轮次；
 agent 通过 MCP 工具（`reply`、`send_image`、`send_voice`、`react` 等）回复，由桥决定发到哪里、怎么发。
 
 ### 架构
@@ -269,7 +301,7 @@ agent 通过 MCP 工具（`reply`、`send_image`、`send_voice`、`react` 等）
 
 | 进程 | 入口 | 职责 |
 |---|---|---|
-| `im-cli` | `cli-host/main.js` 或 `cli-host/codex-main.js` | 通过 Agent SDK 持有 Claude，或通过常驻 app-server 持有 Codex；入站台账保证重启前后每一轮不丢不重。Codex 的 thread id 会落盘，重启后调用 `thread/resume`。提供 `cli.sock`。 |
+| `im-cli` | `cli-host/main.js`、`cli-host/codex-main.js` 或 `cli-host/deepseek-main.js` | 通过 Agent SDK 持有 Claude，或通过常驻 app-server 持有 Codex，或直接调用 DeepSeek 接口；入站台账保证重启前后每一轮不丢不重。Codex 的 thread id 会落盘，重启后调用 `thread/resume`。提供 `cli.sock`。 |
 | `im-box` | `host/box-host.js` | 持有会话：绑定 → 线程号（`sessions.json`）、人格/开场注入、转录裁剪、未被桥确认的回复日志。提供 `box.sock`。 |
 | `im-gate` | `src/host/main.js`（`GATE_BOX=remote`） | 桥本体：按配置自动插上渠道插件，校验入站、排队、路由与投递回复、写冷层记录，给 MCP 工具壳提供 `tools.sock`，并运行守护（上下文水位/自动换会话）。 |
 | `im-heart` | `src/host/heart-host.js` | 可选。定时"心跳"：空闲问候、提醒，以 producer 笔记形式投递。 |
@@ -293,6 +325,12 @@ Telegram、微信、iMessage、电话、weixin-bot（仅库用法）。某条腿
 `GATE_WORKSPACE_ROOT`、`GATE_PREFERRED_CHAT_ID`；`im-gate` 需要 `GATE_BOX=remote`。
 人格、记忆、问候文案都从外部文件读取，示例在 `examples/`。
 
+**DeepSeek 运行时**：直接调 DeepSeek 接口，不起 CLI。对话单独存在 `deepseek-thread.json`，
+不写 Claude 的 `sessions.json`，切回 Claude 原会话不受影响；新对话会用冷层尾部垫底。
+工具 = 盒子递来的 MCP + 本地 `Read`/`Edit`/`Write`/`Bash`，每次调用仍经盒子的许可检查。不支持图片；
+按 token 计费。必填 `DEEPSEEK_API_KEY`，其余变量见英文部分的表格。
+不接盒子单独试：`node cli-host/deepseek-ask.js "你好"`。
+
 ### 运行
 
 ```bash
@@ -302,6 +340,7 @@ set -a; . ./.env; set +a
 node cli-host/main.js                      # im-cli
 # 或者用 Codex（与上一行二选一）：
 node cli-host/codex-main.js                # 常驻 Codex app-server
+# 或者用 DeepSeek：DEEPSEEK_SOCKET="$GATE_ROOT/cli.sock" node cli-host/deepseek-main.js
 node host/box-host.js                      # im-box
 GATE_BOX=remote node src/host/main.js      # im-gate（加 --check 只体检）
 node src/host/heart-host.js                # im-heart（可选）
