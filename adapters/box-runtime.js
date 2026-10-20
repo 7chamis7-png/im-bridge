@@ -201,6 +201,14 @@ function createImBridgeRuntimeAdapter(config) {
           console.log(`[agent] first token turnId=${turnId} write→token=${turn.firstTokenAt - turn.writtenAt}ms `
             + `kind=${raw.event?.delta?.type || '?'}`);
         }
+        // Pass reply text through as it is written. The box uses it only for
+        // turns that came from the phone leg (src/host/phone-stream.js).
+        const ev = raw.event || {};
+        if (ev.type === 'content_block_delta' && ev.delta?.type === 'text_delta' && ev.delta.text) {
+          emit('runtime.reply.delta', { threadId, turnId, text: ev.delta.text });
+        } else if (ev.type === 'content_block_stop') {
+          emit('runtime.reply.delta', { threadId, turnId, end: true });
+        }
         return;
       }
 

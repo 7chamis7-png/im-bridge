@@ -29,6 +29,20 @@
  *
  * Dialing/hanging up are UI actions of the WeChat leg (start_call/end_call);
  * this leg only handles speech once a call is live.
+ *
+ * Call-process socket protocol (one JSON object per line; any reply line = ack):
+ *
+ * - Full segment, from this plugin, after the agent finishes a segment:
+ *     {"type":"say","operationId":"…","text":"…"}
+ * - Streamed sentence, from the box while the turn is still being written
+ *   (src/host/phone-stream.js; only for turns whose inbound came from this leg):
+ *     {"type":"say","text":"…","stream":true,"turnId":"…"}
+ *
+ * The full segment always arrives too, so delivery and the cold log stay
+ * exact. The call process should speak `stream:true` frames immediately and,
+ * when the full segment arrives, skip the text it already spoke from stream
+ * frames (speak only the remainder, if any). A call process that ignores
+ * `stream:true` frames keeps the old behaviour.
  */
 
 const fs = require("fs");

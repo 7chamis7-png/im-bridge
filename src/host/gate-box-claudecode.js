@@ -19,6 +19,7 @@ const os = require("os");
 const path = require("path");
 const { assertEnvelope } = require("../gate/envelope");
 const { normalizeModelInput } = require("../gate/model-input");
+const { makePhoneStreamer } = require("./phone-stream");
 
 /**
  * The model ACTUALLY in use, read from the last message in claude's own
@@ -85,9 +86,10 @@ function readActualFacts({ workspaceRoot, threadId }) {
  *   material (cold tail, handoff, reason) and decides ordering, quotas and labels.
  *   The bridge never sees its contents. No persona = runs without an identity.
  * @param {function} [o.log]
+ * @param {object|null} [o.phoneStreamer] injectable for tests; default streams to GATE_PHONE_SOCKET
  */
 function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
-  persona = null, personaContext = () => ({}), log = () => {} }) {
+  persona = null, personaContext = () => ({}), log = () => {}, phoneStreamer = null }) {
   if (!runtime || typeof runtime.sendTurn !== "function") throw new Error("claude box requires a runtime adapter");
   if (!String(bindingKey || "").trim() || !String(workspaceRoot || "").trim()) {
     throw new Error("claude box requires bindingKey and workspaceRoot (no guessing: collisions corrupt session files)");
@@ -107,6 +109,8 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
   let lastContext = null;
   /** last session id (for reading the transcript) */
   let lastThreadId = "";
+  /** Streams phone-turn sentences to the call process while the turn is still running. */
+  const phoneStream = phoneStreamer || makePhoneStreamer({ log });
 
   const fire = (handlers, payload) => {
     for (const fn of handlers) {
@@ -163,6 +167,16 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
         break;
       }
 
+      // Phone turns only: forward text as it is written (see phone-stream.js).
+      // Other channels ignore these events.
+      case "runtime.reply.delta": {
+        const env = envelopeByTurn.get(p.turnId) || activeEnvelope;
+        if (!env || !env.source || env.source.platform !== "phone") break;
+        if (p.end) phoneStream.flush(p.turnId);
+        else phoneStream.delta(p.turnId, String(p.text || ""));
+        break;
+      }
+
       case "runtime.reply.completed": {
         const text = String(p.text || "").trim();
         if (!text) break;
@@ -183,6 +197,7 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
       }
 
       case "runtime.turn.completed": {
+        phoneStream.done(p.turnId);
         const said = saidByTurn.get(p.turnId) || new Set();
         const finalText = String(p.text || "").trim();
         const source0 = envelopeByTurn.get(p.turnId) || activeEnvelope;
@@ -229,6 +244,7 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
       }
 
       case "runtime.turn.failed": {
+        phoneStream.discard(p.turnId);
         const said = saidByTurn.get(p.turnId) || new Set();
         // Failed turns also emit "done". failed ≠ silent: report them separately.
         const source = envelopeByTurn.get(p.turnId) || activeEnvelope;

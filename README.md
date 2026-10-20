@@ -208,6 +208,13 @@ connect to the box's own `cli.sock` unless `DEEPSEEK_ASK_FORCE=1`).
 
 **Phone leg**: `GATE_PHONE_INBOX_DIR`, `GATE_PHONE_SOCKET` (both required),
 `GATE_PHONE_SEND_TIMEOUT_MS` (`8000`), `GATE_PHONE_IDLE_MS` (`300`).
+For phone turns the box also streams sentences to the call process while the
+agent is still writing (`im-box` needs `GATE_PHONE_SOCKET` too). During the turn
+the call process receives `{"type":"say","text":"…","stream":true,"turnId":"…"}`
+frames, one per sentence; afterwards the full segment arrives as usual
+(`{"type":"say","operationId":"…","text":"…"}`). The call process should speak
+stream frames immediately and skip text it already spoke when the full segment
+arrives. See `src/host/phone-stream.js` and the header of `src/gate/plugins/phone.js`.
 
 **WeChat leg** — required: `GATE_WECHAT_KEYS_FILE`, `GATE_WECHAT_IMAGE_KEY_FILE`,
 `GATE_WECHAT_WHITELIST_FILE`, `GATE_WECHAT_SENDER` (path to `linux-wx-send-a11y.py`),
@@ -325,6 +332,12 @@ Telegram、微信、iMessage、电话、weixin-bot（仅库用法）。某条腿
 数据默认放在 `IM_BRIDGE_HOME`（默认 `~/.im-bridge`）。必填项：`GATE_ROOT`、`GATE_BINDING_KEY`、
 `GATE_WORKSPACE_ROOT`、`GATE_PREFERRED_CHAT_ID`；`im-gate` 需要 `GATE_BOX=remote`。
 人格、记忆、问候文案都从外部文件读取，示例在 `examples/`。
+
+**电话边写边念**：来路是电话的那一轮，盒子会在 agent 还在写的时候按句递给通话进程
+（`im-box` 也要配 `GATE_PHONE_SOCKET`）。轮内通话进程会收到
+`{"type":"say","text":"…","stream":true,"turnId":"…"}`，一句一帧；之后整段照常再到一次
+（`{"type":"say","operationId":"…","text":"…"}`）。通话进程应立刻念流式帧，整段到达时跳过已经念过的部分。
+见 `src/host/phone-stream.js` 和 `src/gate/plugins/phone.js` 文件头。
 
 **DeepSeek 运行时**：直接调 DeepSeek 接口，不起 CLI。对话单独存在 `deepseek-thread.json`，
 不写 Claude 的 `sessions.json`，切回 Claude 原会话不受影响；新对话会用冷层尾部垫底。
