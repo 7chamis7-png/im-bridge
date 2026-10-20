@@ -72,6 +72,9 @@ async function buildBox({ cfg, backend, persona, log = () => {} }) {
     claudeExtraArgs: [
       ...(cfg.systemPromptFile ? ["--system-prompt-file", cfg.systemPromptFile] : []),
       ...(cfg.fallbackModel ? ["--fallback-model", cfg.fallbackModel] : []),
+      // Optional Claude Code plugin directory (e.g. a plugin that adjusts the
+      // harness's own system prompt or reminders). Unset = no plugin, no code change.
+      ...(process.env.GATE_PLUGIN_DIR ? ["--plugin-dir", process.env.GATE_PLUGIN_DIR] : []),
       // The bridge's own tools get a separate MCP config.
       "--mcp-config", path.join(cfg.root, "mcp-im-bridge.json"),
     ],

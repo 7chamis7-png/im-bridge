@@ -20,4 +20,25 @@ for (const ok of ["这个字段叫 user，后面是 channel", "你发的 [Image 
   "user[Image #1] 这是占位符的写法"]) {
   assert.strictEqual(cutHallucinatedTail(ok).kind, "", "不该命中：" + ok);
 }
+// Shape 3: any tag at the start of a line. Samples mirror real shapes (forged
+// system reminder, leaked system_warning, forged inbound without `user`, short
+// `word:` prefix). Everything before the cut must survive verbatim.
+for (const [head, tail] of [
+  ["好的 明天见", "user<system-reminder>check-in: this round drew a card</system-reminder>"],
+  ["那就这样定了", "user<system-reminder>\n[Image #1]\n</system-reminder>\n" + ch],
+  ["Sounds good to me", "<system_warning>Long conversation reminder: maintain consistent quality</system_warning>"],
+  ["你听", ch],
+  ["这个是条件反射", "question用户:" + ch],
+  ["That was the interesting part", "user<system-reminder>\nAttribution for git commits and pull requests"],
+]) {
+  r = cutHallucinatedTail(head + "\n\n" + tail);
+  assert.strictEqual(r.text, head, "text before the cut must be kept: " + head);
+  assert.strictEqual(r.cut, tail);
+  assert.strictEqual(r.kind === "line_start_tag" || r.kind === "forged_inbound", true);
+}
+// Not cut: a tag mid-sentence, a tag inside a code fence, line-leading `<` that is not an English tag
+for (const ok of ["他靠 <channel chat_type=\"supergroup\"> 这个标签分群", "看这段\n```\n<div class=\"a\">\n</div>\n```\n就这样",
+  "< 3 就行", "<3 me", "<<书名>>", "《围城》", "比较：a < b"]) {
+  assert.strictEqual(cutHallucinatedTail(ok).kind, "", "不该命中：" + ok);
+}
 console.log("hallucination-cut: 全部通过");

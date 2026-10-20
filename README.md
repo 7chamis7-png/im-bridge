@@ -105,6 +105,7 @@ See `.env.example` for a template. Data lives under `IM_BRIDGE_HOME`
 | `GATE_CLAUDE_PERMISSION_MODE` | `default` | SDK permission mode |
 | `GATE_CLAUDE_PARTIAL` | — | `on` = stream partial messages |
 | `GATE_SYSTEM_PROMPT_FILE` | — | System prompt file |
+| `GATE_PLUGIN_DIR` | — | Claude Code plugin directory, passed as `--plugin-dir` |
 | `GATE_PERSONA` / `GATE_PERSONA_NAME` | — | Persona directory or `.js` module (see `examples/persona/`) |
 | `GATE_MEMORY_DIR` | `$IM_BRIDGE_HOME/memory` | Memory files injected on a new session (`memory.md`, `agent-state.txt`, `operations.md`, `channels/*.md`, `diary/`) — see `examples/memory/` |
 | `GATE_IDENTITY_INJECTION_FILE` | — | Extra identity text injected on a new session |
