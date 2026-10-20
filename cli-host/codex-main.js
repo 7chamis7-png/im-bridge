@@ -3,12 +3,15 @@
 /**
  * Standalone persistent Codex process for im-bridge.
  *
- * 家在 CODEX_ROOT（默认 GATE_ROOT）。threadId 落在那儿的 state/。
- * 要接盒子时，CODEX_SOCKET（默认 GATE_BOX_SOCKET）指到盒子在听的那只 sock。
- * 不起 claude —— claudePath 给 /usr/bin/true 占位；底座是 codex app-server。
+ * State lives in CODEX_ROOT (default GATE_ROOT); the thread id is persisted
+ * under its state/ directory. It listens on the socket the box connects to
+ * (CODEX_SOCKET, default AGENT_CLI_SOCKET or `$GATE_ROOT/cli.sock`).
+ * No claude CLI is spawned (claudePath is a `/usr/bin/true` placeholder); the
+ * engine is `codex app-server`.
  *
- * 钥匙：codex 走 ~/.codex/auth.json（ChatGPT 订阅），不从 env 借 key。
- * 钱的硬闸在 codex-runtime.js 的 assertSubscription：auth_mode 不是 chatgpt 就当场停。
+ * Credentials: Codex uses `~/.codex/auth.json` (ChatGPT subscription); no API
+ * key is taken from the environment. The billing guard is assertSubscription in
+ * codex-runtime.js: anything other than auth_mode=chatgpt stops immediately.
  */
 
 const fs = require('node:fs');
@@ -29,9 +32,10 @@ const root = envStr('CODEX_ROOT', gateRoot);
 const stateDir = path.join(root, 'state');
 fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 
-// 这是 cli-host 那一层：盒子来连「我」。监听 cli.sock（跟 box-runtime 连的 ROSE_CLI_SOCKET/$GATE_ROOT/cli.sock 对齐），
-// 不是 box.sock（那是盒子监听、gate 去连的）。
-const socketPath = envStr('CODEX_SOCKET', envStr('ROSE_CLI_SOCKET', path.join(gateRoot, 'cli.sock')));
+// This is the cli-host layer: the box connects to us. Listen on cli.sock (the
+// same AGENT_CLI_SOCKET / $GATE_ROOT/cli.sock that adapters/box-runtime.js
+// connects to), not box.sock (which the box listens on and the gate connects to).
+const socketPath = envStr('CODEX_SOCKET', envStr('AGENT_CLI_SOCKET', path.join(gateRoot, 'cli.sock')));
 
 const workspace = envStr('GATE_WORKSPACE_ROOT', envStr('CODEX_CWD'));
 if (!workspace) { console.error('[im-codex] GATE_WORKSPACE_ROOT or CODEX_CWD is required.'); process.exit(1); }
@@ -39,7 +43,7 @@ if (!workspace) { console.error('[im-codex] GATE_WORKSPACE_ROOT or CODEX_CWD is 
 const authFile = envStr('CODEX_AUTH_FILE', path.join(home, '.codex', 'auth.json'));
 const codexPath = envStr('CODEX_COMMAND', envStr('GATE_CODEX_COMMAND', 'codex'));
 
-// 身份底座：喂给 codex 当 developerInstructions。
+// Identity / system prompt, passed to Codex as developerInstructions.
 const injectionFile = envStr('GATE_IDENTITY_INJECTION_FILE', envStr('GATE_SYSTEM_PROMPT_FILE'));
 let systemPrompt = '';
 if (injectionFile) {
@@ -47,7 +51,7 @@ if (injectionFile) {
   catch (error) { console.error('[im-codex] cannot read identity/system prompt (' + injectionFile + '):', error.message); }
 }
 
-// 生产台账（盒子跟插头共用的那本）；没配就用自己 state 里的。
+// Ingress ledger; defaults to one in this process's own state directory.
 const ingressPath = envStr('CODEX_INGRESS', path.join(stateDir, 'ingress.json'));
 
 const host = createCliHost({

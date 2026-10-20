@@ -165,7 +165,7 @@ See `.env.example` for a template. Data lives under `IM_BRIDGE_HOME`
 | `CODEX_HOME_DIR` | OS home | Home containing `.codex/auth.json` |
 | `CODEX_AUTH_FILE` | `$CODEX_HOME_DIR/.codex/auth.json` | Codex login file; only `auth_mode=chatgpt` is accepted |
 | `CODEX_ROOT` | `GATE_ROOT` | Codex state directory |
-| `CODEX_SOCKET` | `$GATE_ROOT/cli.sock` | CLI socket used by im-box |
+| `CODEX_SOCKET` | `AGENT_CLI_SOCKET` or `$GATE_ROOT/cli.sock` | CLI socket used by im-box |
 | `CODEX_INGRESS` | `$CODEX_ROOT/state/ingress.json` | Reliable ingress ledger |
 | `CODEX_THREAD_FILE` | `$CODEX_ROOT/state/codex-thread.json` | Persisted thread id used by `thread/resume` after restart |
 | `CODEX_APPROVAL_POLICY` | `never` | Approval policy passed to Codex app-server |
@@ -188,7 +188,7 @@ billed per token by the API provider.
 | `DEEPSEEK_MODEL` | `deepseek-chat` | Model name; independent from Claude `/model` choices |
 | `DEEPSEEK_TIMEOUT_MS` | `90000` | Per-request timeout |
 | `DEEPSEEK_ROOT` | `$GATE_ROOT/deepseek` | State directory (ledger, `deepseek-thread.json`) |
-| `DEEPSEEK_SOCKET` | `$DEEPSEEK_ROOT/deepseek.sock` | Socket to listen on. Set to `$GATE_ROOT/cli.sock` to serve the box instead of the Claude im-cli |
+| `DEEPSEEK_SOCKET` | `$DEEPSEEK_ROOT/deepseek.sock` | Socket to listen on. Set to the box's CLI socket (`AGENT_CLI_SOCKET`, default `$GATE_ROOT/cli.sock`) to serve the box instead of the Claude im-cli |
 | `DEEPSEEK_INGRESS` | `$DEEPSEEK_ROOT/state/ingress.json` | Reliable ingress ledger |
 | `DEEPSEEK_SCOPE` | `deepseek` | Ledger scope |
 | `DEEPSEEK_CWD` | `GATE_WORKSPACE_ROOT` | Workspace (tool cwd; its `CLAUDE.md` and `.mcp.json` are read) |

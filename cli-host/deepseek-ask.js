@@ -28,7 +28,8 @@ if (!text) {
 }
 // The box is the only client of its CLI socket. Connecting a second client
 // would kick the box off, and the owner's next message would go unanswered.
-if (path.resolve(socketPath) === path.resolve(gateRoot, 'cli.sock') && process.env.DEEPSEEK_ASK_FORCE !== '1') {
+const boxSocket = envStr('AGENT_CLI_SOCKET', path.join(gateRoot, 'cli.sock'));
+if (path.resolve(socketPath) === path.resolve(boxSocket) && process.env.DEEPSEEK_ASK_FORCE !== '1') {
   console.error('This socket is the one the box uses; connecting here would disconnect the box. Set DEEPSEEK_ASK_FORCE=1 to override.');
   process.exit(2);
 }
