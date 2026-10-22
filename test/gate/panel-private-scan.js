@@ -8,7 +8,8 @@
  *   · allow:<原文> 开头的行是豁免：先把这些原文从内容里抠掉再查（比如桥本来就有的 env 名）
  * 没设 PRIVATE_WORDS_FILE → 打印「未配置私货词表，跳过」，算通过。格式样例见 examples/private-words.example。
  *
- * 扫的范围：src/panel/**、docs/panel*、examples/panel*、test/panel-fixture.js、test/gate/panel*.js（二进制图片不扫）。
+ * 扫的范围：src/panel/**、docs/panel*、examples/panel*、test/panel-fixture.js、test/gate/panel*.js；
+ * 电话那条腿：legs/**、test/legs/**、docs/phone.md、scripts/setup-phone-audio.sh、test/gate/phone-leg.js（二进制图片不扫）。
  */
 const fs = require("fs");
 const path = require("path");
@@ -35,6 +36,12 @@ const targets = [];
 walk(path.join(ROOT, "src", "panel"), targets);
 for (const [dir, re] of [["docs", /^panel/], ["examples", /^panel/], ["test", /^panel-fixture\.js$/], [path.join("test", "gate"), /^panel/]]) {
   for (const n of fs.readdirSync(path.join(ROOT, dir))) if (re.test(n)) walk(path.join(ROOT, dir, n), targets);
+}
+// 电话那条腿（2026-10-22 收进仓库时就要求干净）：通话进程、声卡脚本、文档、测试
+walk(path.join(ROOT, "legs"), targets);
+walk(path.join(ROOT, "test", "legs"), targets);
+for (const f of [["docs", "phone.md"], ["scripts", "setup-phone-audio.sh"], ["test", "gate", "phone-leg.js"]]) {
+  walk(path.join(ROOT, ...f), targets);
 }
 
 let hits = 0;

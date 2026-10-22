@@ -150,6 +150,14 @@ doctor 会试着用 `sqlcipher -readonly` 解开一个库数表，确认密钥�
   - 总开关 `~/.<id>-gate/.gate-enabled`：删掉 = 立刻停收停发，不用重启。
 - 被处罚期间别反复重启微信 / Xvfb，可能登不回来。
 
+### 电话（可选，建在微信那条之上）
+
+他在微信语音通话里开口说话、听她说话。多一个进程 `<id>-phone`（`legs/phone/phone.py`），
+要 PulseAudio 虚拟声卡（`scripts/setup-phone-audio.sh` 建 / `--check` 体检）、ElevenLabs key + voice id，
+可选 north-ear 听语气。全套步骤、配置表、排错见 **[phone.md](phone.md)**。
+
+⚠️ pulse 重启过之后微信必须跟着重启，否则通话两头都哑。
+
 ## 5. 从旧机器搬一个已有角色
 
 原则：**按「不该搬什么」划，别按「该搬什么」列** —— 白名单一定漏。先停旧机器上这个角色的**全部**进程（两边同时跑 = 两边都在收同一个 bot 的消息、都在回）。

@@ -11,22 +11,21 @@
  * 别的腿两头都是文字。这条腿两头是**声音**，文字只是中间形态：
  *
  * ```
- *   微信播放 → snd-aloop 真声卡 .monitor → VAD 断句 → 本地转写 ──┐
- *             （= Default Sink）                                  ↓
- *                                                        这条腿的入站（文字）
- *                                                                 ↓
- *                                                        闸 → 他 → 出闸
- *                                                                 ↓
- *   微信采集 ← nova_mic ← nova_mic_sink ← 合成 ← 剥掉 [标签] ←─────┘
- *           （= Default Source）                      这条腿的出站（文字）
- *
- * ⚠️ 耳朵贴的是 **snd-aloop 那块真声卡**，不是 null-sink。原来那个 `nova_speaker`
- *    录起来零帧（微信的声音走默认输出 = 真声卡，不走它），2026-09-18 已删。
- *    设备名以 `nova-phone/run-phone.sh` 的 PHONE_IN / PHONE_OUT 为准。
+ *   微信播放 → <PHONE_SPEAKER> null-sink（默认输出）.monitor → VAD 断句 → 转写 ──┐
+ *                                                                              ↓
+ *                                                                   这条腿的入站（文字）
+ *                                                                              ↓
+ *                                                                   闸 → 他 → 出闸
+ *                                                                              ↓
+ *   微信采集 ← <PHONE_MIC>（默认输入，remap）← <PHONE_MIC_SINK> ← 合成 ←────────┘
+ *                                                                   这条腿的出站（文字）
  * ```
  *
- * 声音那一整段脏活在**另一个进程**里（`/root/nova-phone/phone.py`，Pipecat）。
- * 这条腿只管跟它交换文字，一个音频 API 都不碰 —— 桥不该认识 PyAudio。
+ * 设备怎么建见 `scripts/setup-phone-audio.sh`（2026-09-18 那版走过 snd-aloop 真声卡，
+ * 现在是两个 null-sink + 一个 remap，以那个脚本为准）。
+ *
+ * 声音那一整段脏活在**另一个进程**里（`legs/phone/phone.py`，见 docs/phone.md）。
+ * 这条腿只管跟它交换文字，一个音频 API 都不碰。
  *
  * ## 为什么入站走文件、出站走 socket
  *

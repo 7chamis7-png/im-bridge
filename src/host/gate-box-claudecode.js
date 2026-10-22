@@ -103,6 +103,17 @@ function readActualFacts({ workspaceRoot, threadId }) {
  */
 const { makePhoneStreamer } = require("./phone-stream");
 
+/**
+ * 这一轮的话要不要边写边递给通话进程：她在电话里说的（来路是 phone），
+ * 或者是通话进程推进来、指定落点是电话的那条系统提醒（「接通了她没出声，你先开口」，
+ * 见 legs/phone/phone.py）。别的渠道不碰。
+ */
+function isPhoneTurn(env) {
+  if (!env) return false;
+  if (env.source && env.source.platform === "phone") return true;
+  return Boolean(env.source && env.source.kind === "system" && env.target && env.target.platform === "phone");
+}
+
 function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
   persona = null, personaContext = () => ({}), log = () => {}, history = null }) {
   if (!runtime || typeof runtime.sendTurn !== "function") throw new Error("真盒子要一个运行时适配器");
@@ -200,7 +211,7 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
       // 电话那一轮：字一边吐一边递给通话进程（见 phone-stream.js）。别的渠道不碰。
       case "runtime.reply.delta": {
         const env = envelopeByTurn.get(p.turnId) || activeEnvelope;
-        if (!env || !env.source || env.source.platform !== "phone") break;
+        if (!isPhoneTurn(env)) break;
         if (p.end) phoneStream.flush(p.turnId);
         else phoneStream.delta(p.turnId, String(p.text || ""));
         break;
@@ -514,4 +525,4 @@ function withOrigin(text, envelope) {
   };
 }
 
-module.exports = { makeClaudeCodeBox };
+module.exports = { makeClaudeCodeBox, isPhoneTurn };
