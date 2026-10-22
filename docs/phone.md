@@ -57,6 +57,20 @@
 | ElevenLabs API key + voice id | 转写（Scribe）+ 合成 | ElevenLabs 后台。**按量计费**，见 §8 |
 | north-ear（可选，不在本仓库） | 听语气：音高 / 气声，附在转写后面一行；也用来认回铃音 | 自己装一个 venv，配 `NORTH_EAR_PYTHON` / `NORTH_EAR_SCRIPT`；不配就跳过 |
 
+### 验证过的环境（2026-10）
+
+| 部件 | 版本 |
+|---|---|
+| 系统 | Ubuntu 24.04 LTS |
+| 微信 | 官方 Linux 版 4.1.13.23（`apt-mark hold wechat` 锁住，不自动升级） |
+| 虚拟屏 / 窗管 | Xvfb 21.1、openbox 3.6 |
+| 无障碍 | at-spi2-core 2.52、xdotool 3.20160805 |
+| 声音 | PulseAudio 16.1 + pulseaudio-utils 16.1 |
+| 其他 | ffmpeg 6.1、Node.js 22、Python 3.12 |
+| 语音服务 | ElevenLabs（转写 + 合成，按量计费） |
+
+微信大版本升级后，界面坐标 / 窗口标题 / 库表都可能要重对。
+
 ## 3. 安装
 
 1. **虚拟声卡**（幂等，已经有的不重复建）：
@@ -205,6 +219,9 @@
 ---
 
 ## English summary
+
+Verified on Ubuntu 24.04, WeChat for Linux 4.1.13.23 (held), Xvfb 21.1, openbox 3.6, at-spi2 2.52, PulseAudio 16.1, ffmpeg 6.1, Node 22, Python 3.12, ElevenLabs.
+
 
 The **phone leg** lets the agent talk and listen inside a WeChat voice call. The bridge treats it as a normal
 channel (`phone`): her speech is transcribed into text and enters the gate; his replies leave the gate and are spoken
