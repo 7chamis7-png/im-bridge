@@ -1,0 +1,11 @@
+{
+  "name": "im-bridge-tool-daily",
+  "private": true,
+  "description": "Nova的日常两件：只读浏览器 + 设提醒（从老 nova_tools 搬出来）",
+  "scripts": {
+    "test": "node --test test.js"
+  },
+  "dependencies": {
+    "playwright-core": "1.59.1"
+  }
+}

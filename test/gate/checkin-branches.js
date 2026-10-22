@@ -1,8 +1,7 @@
 "use strict";
-// check-in branch dice + header placeholders + fun menu.
-// Checks: (1) weights drive the roll (2) empty placeholders drop the whole header line
-// (3) {pending} is computed but not rendered by default (4) missing texts fall back to
-// built-ins, never an empty message (5) fun menu draws distinct items, count from funMenu
+// check-in 的骰子分支 + HEADER 占位符 + fun 菜单抽取（2026-09-22 加）。
+// 盯的事：①三分支权重按配置抽 ②HEADER 空占位符整行丢 ③pending 默认不渲染但算法还在
+// ④文案文件缺失/缺段退默认，不推空消息 ⑤fun 菜单不重复抽、数量受 funMenu 配置管
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -25,6 +24,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
 }
 
 // ---- 2. readBranchWeights：配置文件里的 branches 键，缺哪个补默认 ----
+// （2026-09-22 晚加了 egg 第四支，下面几个用例跟着从三支改成四支）
 {
   const cfg = path.join(tmp, "cfg1.json");
   fs.writeFileSync(cfg, JSON.stringify({ branches: { heart: 1, fun: 0 } }));
@@ -79,8 +79,8 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
 {
   const now = new Date("2026-09-22T03:00:00.000Z");
   assert.strictEqual(c.fmtSinceLast(now, 0), "");
-  assert.strictEqual(c.fmtSinceLast(now, now.getTime() - 5 * 60000), "5 min");
-  assert.strictEqual(c.fmtSinceLast(now, now.getTime() - 65 * 60000), "1h 5m");
+  assert.strictEqual(c.fmtSinceLast(now, now.getTime() - 5 * 60000), "5 分钟");
+  assert.strictEqual(c.fmtSinceLast(now, now.getTime() - 65 * 60000), "1 小时 5 分钟");
 
   assert.strictEqual(c.fmtDrives(null), "");
   assert.strictEqual(c.fmtDrives({}), "");
@@ -89,10 +89,10 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
   assert.strictEqual(c.fmtLastUserLine(now, 0, "x"), "");
   const lastUserAt = now.getTime() - 37 * 60000;
   const line = c.fmtLastUserLine(now, lastUserAt, "今天有点累  早点睡了");
-  assert.ok(/^Owner last spoke at \d\d:\d\d \(37 min ago\): “今天有点累 早点睡了”$/.test(line), line);
-  // no quote → time only
+  assert.ok(/^我上次说话是 \d\d:\d\d 37分钟前 我说的是「今天有点累 早点睡了」$/.test(line), line);
+  // 没有原话 → 只给时间点，没有「我说的是」
   const line2 = c.fmtLastUserLine(now, lastUserAt, "");
-  assert.ok(!line2.includes("“"), line2);
+  assert.ok(!line2.includes("我说的是"), line2);
 }
 
 // ---- 5. readTexts：文件缺失/缺段 → 退默认；有的段用文件里的 ----
@@ -106,7 +106,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
   assert.strictEqual(t.cave, c.DEFAULT_TEXTS.cave);
   assert.strictEqual(t.fun, c.DEFAULT_TEXTS.fun);
   assert.deepStrictEqual(t.fun_menu, c.DEFAULT_FUN_MENU, "没有 fun_menu 段 → 退内置菜单");
-  // egg pools follow the same rule
+  // 彩蛋各池子同一个规矩：没写就退内置副本（2026-09-22 晚加）
   assert.deepStrictEqual(t.egg_notes, c.DEFAULT_EGG_NOTES);
   assert.deepStrictEqual(t.egg_deeptalk_day, c.DEFAULT_EGG_DEEPTALK_DAY);
   assert.deepStrictEqual(t.egg_deeptalk_night, c.DEFAULT_EGG_DEEPTALK_NIGHT);
@@ -120,7 +120,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
     "## egg_deeptalk_day", "白天问题",
     "## egg_deeptalk_night", "深夜问题",
     "## egg_dare", "大冒险甲",
-    "## egg_dare_night", "大冒险乙（夜间）",
+    "## egg_dare_night", "大冒险乙（夜间专供）",
     "## egg_hidden", "隐藏事件唯一一行",
   ].join("\n"));
   const t2 = c.readTexts(md2);
@@ -128,7 +128,7 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
   assert.deepStrictEqual(t2.egg_deeptalk_day, ["白天问题"]);
   assert.deepStrictEqual(t2.egg_deeptalk_night, ["深夜问题"]);
   assert.deepStrictEqual(t2.egg_dare, ["大冒险甲"]);
-  assert.deepStrictEqual(t2.egg_dare_night, ["大冒险乙（夜间）"]);
+  assert.deepStrictEqual(t2.egg_dare_night, ["大冒险乙（夜间专供）"]);
   assert.strictEqual(t2.egg_hidden, "隐藏事件唯一一行");
 }
 
@@ -157,25 +157,25 @@ const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-branches-"));
 
 // ---- 8. 端到端 tick()：HEADER + 分支正文拼出来的样子 ----
 async function main() {
-  // 8a. built-in texts (textsFile missing), die forced onto heart
+  // 8a. 默认文案（textsFile 指向不存在的文件，走内置副本），骰子强制落 heart
   {
     const dir = fs.mkdtempSync(path.join(tmp, "dir-"));
     const chk = c.makeCheckin({
       dir, configFile: path.join(tmp, "无.json"), textsFile: path.join(tmp, "无.md"),
-      coldFile: path.join(tmp, "无.jsonl"), drivesUrl: "", rand: () => 0.01,
+      coldFile: path.join(tmp, "无.jsonl"), desireUrl: "", rand: () => 0.01,
     });
     const r = await chk.tick();
     assert.strictEqual(r.branch, "heart");
     const f = fs.readdirSync(dir)[0];
     const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
-    assert.ok(text.includes("[Talk]"), text);
-    assert.ok(text.includes("Now: "), text);
-    assert.ok(!text.includes("Open items"), "pending is not rendered by default: " + text);
-    assert.ok(!text.includes("{"), "no raw placeholders: " + text);
-    assert.ok(text.includes("Nothing to say is fine too."), "heart body present: " + text);
+    assert.ok(text.includes("【说心里话】"), text);
+    assert.ok(text.includes("现在 "), text);
+    assert.ok(!text.includes("你手上挂着的"), "9-22 起默认不渲染 pending 这一行：" + text);
+    assert.ok(!text.includes("{"), "不该留生字的占位符：" + text);
+    assert.ok(text.includes("我手机静音了 吵不到我"), "heart 正文要在：" + text);
   }
 
-  // 8b. fun branch: numbered menu from the custom fun_menu
+  // 8b. fun 分支：抽出来的菜单编号要在正文里，且来自自定义 fun_menu
   {
     const dir = fs.mkdtempSync(path.join(tmp, "dir-"));
     const cfg = path.join(tmp, "cfg-fun.json");
@@ -184,10 +184,10 @@ async function main() {
     fs.writeFileSync(md, "## fun\n菜单来了：\n{menu}\n## fun_menu\n选项甲\n选项乙\n选项丙\n");
     const chk = c.makeCheckin({
       dir, configFile: cfg, textsFile: md, coldFile: path.join(tmp, "无2.jsonl"),
-      // 0.7 lands in the fun bucket [0.55,0.85) of the default weights
-      drivesUrl: "", rand: () => 0.7,
+      // 0.7 落在默认权重 heart .25/cave .30/fun .30/egg .15 的 fun 桶（[0.55,0.85)）里
+      desireUrl: "", rand: () => 0.7,
     });
-    const r = await chk.tick();
+    const r = await chk.tick({ now: new Date("2026-09-22T06:30:00Z") });   // 北京 14:30，固定在白天池子
     assert.strictEqual(r.branch, "fun");
     const f = fs.readdirSync(dir)[0];
     const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
@@ -195,36 +195,37 @@ async function main() {
     assert.ok(!text.includes("{menu}"), "menu 占位符要被替换掉：" + text);
   }
 
-  // 8c. {pending} is still computed; a custom header that references it renders it
+  // 8c. pending 算法仍在跑（透传进 vars），只是模板默认不含 {pending}——
+  //     用一个自定义 HEADER 把它加回来验证「能力还在」
   {
     const dir = fs.mkdtempSync(path.join(tmp, "dir-"));
     const md = path.join(tmp, "texts-pending.md");
     fs.writeFileSync(md, "## header\nH {branch_name}\n挂着：{pending}\n");
     const chk = c.makeCheckin({
       dir, configFile: path.join(tmp, "无3.json"), textsFile: md, coldFile: path.join(tmp, "无3.jsonl"),
-      drivesUrl: "", pendingText: () => "「测试待办」", rand: () => 0.01,
+      desireUrl: "", pendingText: () => "「测试待办」", rand: () => 0.01,
     });
     const r = await chk.tick();
     const f = fs.readdirSync(dir)[0];
     const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
-    assert.ok(text.includes("挂着：「测试待办」"), "pending renders when the header references it: " + text);
+    assert.ok(text.includes("挂着：「测试待办」"), "加回这行就能看到 pending，说明算法没删：" + text);
   }
 
-  // 8d. garbage texts file (no sections) → built-ins, never empty
+  // 8d. 文案文件整个是垃圾内容（没有任何 ## 段落）→ 照样退回内置副本，不推空/不崩
   {
     const dir = fs.mkdtempSync(path.join(tmp, "dir-"));
     const md = path.join(tmp, "garbage.md");
     fs.writeFileSync(md, "这不是我们认得的格式，也没有任何 ## 分段\n随便写点什么\n");
     const chk = c.makeCheckin({
       dir, configFile: path.join(tmp, "无4.json"), textsFile: md, coldFile: path.join(tmp, "无4.jsonl"),
-      // 0.7 → fun bucket (0.99 would land in egg)
-      drivesUrl: "", rand: () => 0.7,
+      // 同上，0.7 落在 fun 桶里（不能再用 0.99 了，那会落进新加的 egg 桶）
+      desireUrl: "", rand: () => 0.7,
     });
     const r = await chk.tick();
     const f = fs.readdirSync(dir)[0];
     const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
-    assert.ok(text.trim().length > 0, "must not send an empty message");
-    assert.ok(text.includes("Free time"), text);
+    assert.ok(text.trim().length > 0, "不许推空消息");
+    assert.ok(text.includes("娱乐时间"), text);
   }
 
   console.log("checkin-branches: ok");

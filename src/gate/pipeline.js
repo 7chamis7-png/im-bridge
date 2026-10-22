@@ -1,20 +1,22 @@
 "use strict";
 
 /**
- * Main loop — connects the parts into a bridge.
+ * 主循环 —— 把零件串成一座桥（2026-09-18）
  *
- *   owner says something
- *     → plugin translation (raw platform record → standard delivery)
- *     → media processing (fetch bytes / store / transcribe / vision)
- *     → inbound gate (verify · identify · number · write cold layer)
- *     → envelope
- *     → box (CLI)
- *   agent replies
- *     → routing (five policies)
- *     → outbound gate (precheck · send · ledger · trace)
- *     → plugin turns it into a platform action
+ *   她说一句
+ *     → 插头翻译（平台原始记录 → 标准交付）
+ *     → 媒体加工（取字节 / 落仓 / 转写 / 识图）
+ *     → 入闸（验收 · 认人 · 编号 · 写冷层）
+ *     → 信封
+ *     → 盒子（CLI）
+ *   他回一句
+ *     → 路由定落点（五档）
+ *     → 出闸（预检 · 发 · 记账 · 留痕）
+ *     → 插头变成平台动作
  *
- * It knows neither Telegram nor Claude: plugins and the box are injected at assembly time.
+ * 在这之前 `src/gate/` 是一堆零件：每个都测过，但没有一条路把它们连起来。
+ * 这个文件就是那条路。**它不认识 telegram，也不认识 claude** —— 插头和盒子
+ * 都是装配时给的。
  */
 
 const { makeEnvelope } = require("./envelope");
@@ -26,27 +28,26 @@ const { makeTurnQueue } = require("./turn-queue");
 const path = require("path");
 
 /**
- * Buffered group messages → one body the agent can read.
+ * 攒着的那批群消息 → 一段他看得懂的正文。
  *
- * The speaker is written into the body, not an identity field: a group turn's identity is
- * the group (see inbound.identityForTurn).
+ * **谁说的写在正文里**，不走身份字段 —— 群轮的身份是「群」（见 inbound.identityForTurn）。
+ * 老桥也是这么做的（buildBatchedChannelTag），这里只是把它搬进共用层。
  */
 function renderGroupBatch(unread) {
   return unread.map((m) => {
     const who = String(m.speaker || "").trim() || "某人";
-    // Whether a line is from the owner is computed from the real platform id when buffering,
-    // never from the nickname (anyone can rename themselves). Brackets are stripped from
-    // nicknames at buffer time, so this marker cannot be forged.
-    return (m.isOwner ? "[owner] " : "[群友] ") + who + "：" + String(m.text || "");
+    // **谁是她，由真实平台 id 算出来**（群闸 buffer 时定的），不是看昵称 ——
+    // 群里任何人都能把昵称改成「Alice」。老桥那头是 `from_is_alice`，一个道理。
+    // 昵称里的方括号在 buffer 时已经剥掉，伪造不出这个标记。
+    return (m.isOwner ? "[她本人] " : "[群友] ") + who + "：" + String(m.text || "");
   }).join("\n");
 }
 
 /**
- * Delivery → envelope (command path only).
+ * 交付 → 信封（只给命令那条路用）。
  *
- * Commands don't enter the box or the cold layer, but they are still owner inbound: the
- * last-active route must follow them, otherwise a command issued in a group would get its
- * receipt in the private chat.
+ * 命令不进盒子、不落冷层，但它**是她的一条入站** —— 最近活跃路要跟着它走，
+ * 否则在群里下的命令，回执会跑去私聊（第 3 档拿的是上一条入站的来路）。
  */
 function envelopeFromDelivery(d, identity) {
   return makeEnvelope({
@@ -62,7 +63,7 @@ function envelopeFromDelivery(d, identity) {
   });
 }
 
-/** Inbound event → envelope. Transitional until the inbound gate emits envelopes directly. */
+/** 入闸的事件 → 信封。过渡用：等入闸本身改成直接产出信封，这个函数就没了。 */
 function envelopeFromEvent(event, { producer = "" } = {}) {
   return makeEnvelope({
     trace_id: event.eventId,
@@ -86,26 +87,26 @@ function envelopeFromEvent(event, { producer = "" } = {}) {
 
 /**
  * @param {object} o
- * @param {Map|object} o.plugins  channel name → plugin (must have get())
- * @param {object} o.inbound      inbound gate
- * @param {object} o.outbound     outbound gate
- * @param {object} o.box          the box
- * @param {object} o.router       router (five policies)
- * @param {object} [o.media]      media pipeline; omitted = text only
- * @param {object} [o.groups]     group gate (group.js); omitted = no group messages
- * @param {string} [o.owner]      owner identity name; only used to decide who may run commands
+ * @param {Map|object} o.plugins  渠道名 → 插头（要有 get()）
+ * @param {object} o.inbound      入闸
+ * @param {object} o.outbound     出闸
+ * @param {object} o.box          盒子（五条口）
+ * @param {object} o.router       路由（五档）
+ * @param {object} [o.media]      媒体流水线；不给就只走文本
+ * @param {object} [o.groups]     群闸（group.js）。不给 = 这座桥不收群消息
+ * @param {string} [o.owner]      她的身份名。**只用来判「谁有资格下命令」**
  * @param {function} [o.log]
  */
 function makePipeline({ plugins, inbound, outbound, box, router, media = null, undelivered = null,
-  groups = null, owner = "owner", binding = null, enabled = () => true, log = () => {},
+  groups = null, owner = "alice", binding = null, enabled = () => true, log = () => {},
   closingNote = null }) {
   if (!plugins || typeof plugins.get !== "function") throw new Error("主循环要一份「渠道名 → 插头」的表");
   if (!box) throw new Error("主循环要一个盒子（没有盒子，话送不进去也拿不出来）");
-  if (!router) throw new Error("主循环要一个路由（没有路由，回复不知道发给谁）");
+  if (!router) throw new Error("主循环要一个路由（没有路由，他的话不知道发给谁）");
 
   /**
-   * Push a turn from outside the bridge (producer drop-box, closing turn before rotation, ...).
-   * A function declaration rather than a method: `commands` below already needs it.
+   * 桥外面的东西推一轮进来（生产者投递口、换舱收尾…）。
+   * 函数声明而不是对象方法：`commands` 在它上面就要用到它（换舱前的收尾轮）。
    */
   async function pushSystem({ text, producer = "", target = null, id = "" }) {
     const env = makeEnvelope({
@@ -116,17 +117,18 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     return { ...result, envelope: env };
   }
 
-  /** Commands (the bridge's built-ins). The host can register more; the bridge doesn't know their names. */
+  /** 命令（桥自己能干的那几件）。宿主可以往上注册自己的，桥不认识它们叫什么。 */
   const commands = makeCommands({
     box,
     stats: () => ({ ...stats }),
     undelivered: () => undelivered,
     held: () => held.slice(),
     lastSeen: () => inbound.store.lastSeen(),
-    // Before rotating, push a closing turn and wait for it to finish. The bridge doesn't
-    // know its content (the host supplies `closingNote`); omitted = rotate directly.
-    // The final state of that turn is returned so the receipt can report honestly whether
-    // it actually ran (it may be interrupted immediately, e.g. when the old session refuses).
+    // 关舱前先送一轮进去，**等他做完再换**（2026-09-19）。
+    // ⚠️ **桥不认识那一轮里写的是什么**（铁律 2/3）：正文由宿主给（`closingNote`），
+    // 桥只负责「换舱之前先 push 一轮、等它跑完」。不给就没有这一步，照旧直接换。
+    // 2026-09-21：不再只 push 就算数。今天 12:39 那次收尾轮 0.1 秒就被 CLI 中断（旧舱在拒答），
+    // 桥却报「他收了尾，用时 0 秒」。现在等它真跑完，把这一轮的最终状态交回去，让回执如实说。
     beforeRotate: closingNote ? async ({ reason }) => {
       const r = await pushSystem({ text: String(closingNote({ reason }) || ""), producer: "换舱收尾" });
       await queue.idle();
@@ -134,14 +136,14 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       return { taskId: r && r.taskId, state: (row && row.state) || (r && r.state) || "unknown", reason: (row && row.reason) || "" };
     } : null,
   });
-  /** Messages that could not be routed and are held (policy 5: don't guess). Never lost silently. */
+  /** 发不出去、暂存下来的那些（第 5 档：不猜）。**不许无声丢失。** */
   const held = [];
   const stats = { in: 0, blocked: 0, out: 0, silent: 0, heldCount: 0, failed: 0 };
   const queue = makeTurnQueue({
     file: path.join(inbound.store.root, "turns.json"), box, binding, enabled, log,
-    // After a restart, turns that were submitted but never acknowledged are reconciled using
-    // the outbox ledger as evidence: any outbox operation for the turn proves the box produced
-    // a reply. Without evidence they are left for manual review — never assumed "not run".
+    // 重启后「提交了但没等到回执」的那些，用出站账本当证据自动认掉能认的那一半：
+    // 出站账本里只要有这一轮的操作，就说明盒子对这一轮产出过回复（`outbox.create`
+    // 发生在 onReply → deliver 的路上）。查不到就原样留着等人核对，绝不反向判「没跑」。
     reconciler: (row) => {
       const outbox = outbound && outbound.outbox;
       if (!row.turnId || !outbox || typeof outbox.all !== "function") return null;
@@ -153,9 +155,9 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     onReply: async (task, { turnId, text, outputId, genuine }) => {
       const inbEnv = task.envelope;
       const route = task.route;
-      // The box marked this text as not genuinely the model's (refusal / API error, see the
-      // box's `genuine` flag). Still send it — the owner should know the turn was blocked —
-      // but keep it out of the cold layer, which only holds real conversation.
+      // 盒子说这句**不是他说的**（安全层拒答 / API 报错，见 gate-box 的 genuine）。
+      // 照发 —— 她得知道他这轮被挡了；但不进冷层，冷层只装真实对话。
+      // 桥不判断「为什么不是」，那是盒子的活（铁律 3）。
       const cold = genuine === false ? { write: false, reason: "not_model_reply" } : null;
       if (cold) log(`[冷层] 跳过一条非模型正文 turnId=${turnId}（已留在事件账本）`);
       if (!route.ok) {
@@ -164,8 +166,8 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
         // Outbound writes the content and its blocked receipt durably.
         return outbound.deliver({ turnId, text, outputId, cold });
       }
-    // The outbound gate still takes the old shape (turn + inboundEvent). The resolved target is
-    // wrapped in so it takes the reply-route branch.
+    // 出闸吃的还是旧形状（turn + inboundEvent）。路由解析出来的落点包装进去，
+    // 让它走「原路返回」那一支 —— 等出闸改成直接吃信封，这层包装就没了。
     const turn = {
       turnId, outputId,
       replyToEventId: inbEnv ? inbEnv.trace_id : "routed-" + turnId,
@@ -185,7 +187,7 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       else if (r.outcome === "silent") stats.silent += 1;
       else {
         stats.failed += 1;
-        // "Has content but couldn't send" must never masquerade as silence; outbound already traced it.
+        // 「有内容但发不出去」绝不许伪装成沉默 —— 出闸自己已经留痕，这里只记日志。
         log(`[主循环] 没发出去 outcome=${r.outcome} reason=${r.reason || ""}`);
       }
       return r;
@@ -216,7 +218,7 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       return pending;
     },
     /**
-     * An inbound message from some leg. The single inbound entry point.
+     * 她说了一句（或某条腿捞上来一条）。**这是入站唯一入口。**
      * @returns {{accepted:boolean, reason?:string, envelope?:object, turnId?:string}}
      */
     async _ingest({ channel, raw, extraMedia = [] }) {
@@ -228,41 +230,51 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
         delivery.media = (Array.isArray(delivery.media) ? delivery.media : []).concat(extraMedia);
       }
 
-      // ——— Groups: allowlist first ———
-      // Decisions here, actions in the plugin (plugins only provide the addressing facts). See group.js.
+      // ——— 群那一套：白名单先过 ———
+      // 决定在这儿，动作在插头（插头只交出 addressing 那几个事实）。见 src/gate/group.js。
       const isGroup = delivery.chatType && delivery.chatType !== "private";
       if (isGroup) {
         if (!groups) return { accepted: false, reason: "group_not_supported" };
         if (!groups.isAllowed(delivery)) {
-          // Non-allowlisted groups are dropped entirely (not buffered) — no storing chat logs for
-          // groups the bot was added to. The allowlist check precedes commands.
+          // 不在白名单的群**整条不要**，也不攒 —— 免得被拉进陌生群还替人存着聊天记录。
+          // 白名单必须在命令之前：陌生群里的 /new 连看都不该看一眼。
           stats.groupIgnored = (stats.groupIgnored || 0) + 1;
           return { accepted: false, reason: "group_not_allowed" };
         }
       }
 
-      // ——— Is this "work for the bridge" rather than "talk to the agent"? ———
-      // Only registered commands are intercepted; `/something` otherwise goes to the agent.
-      // Identity is checked before commands, so strangers can't run /new.
-      // Only the speaker's own identity counts, never the group identity — otherwise anyone in
-      // a group could run /new.
-      // This must run before group batch rendering, which prefixes the body with the speaker
-      // and would move the slash away from the start.
+      // ——— 这句话是不是「让桥干活」而不是「跟他说话」 ———
+      // ⚠️ 只拦**注册过的**命令。她发 `/想你了` 绝不能因为有个斜杠就被吞掉。
+      // ⚠️ **先认人再看命令**（2026-09-18 测试当场抓到的安全洞）：
+      // 原来命令层在入闸之前跑，任何陌生人发一句 /new 就能把他的舱换掉。
+      // ⚠️⚠️ 而且**只认发言人本人，不认群身份** —— 群轮的身份是「群」，
+      // 拿它当门票，等于群里随便谁一句 /new 就能把他的舱换掉（同一个洞的群版）。
+      // ⚠️⚠️⚠️ **必须在群批量渲染之前**：渲染会把正文包成「[她本人] Alice：/status」，
+      // 斜杠不在开头，命令当场失效。老桥也是先认命令再攒群消息（listener.js 的顺序）。
       const who = inbound.resolveIdentity(delivery);
       const cmd = who === owner ? commands.match(delivery.text) : null;
       if (cmd) {
-        // The receipt goes back where the command was issued (group → group), via the
-        // "last active = owner inbound" routing policy (SPEC §4 policy 3).
+        // 命令的回执该回到她下命令的地方 —— 在群里下的就回群里。
+        // 靠的是「最近活跃路只算她的入站」那一档（SPEC §4 第 3 档），不是给投递口加参数。
         router.noteInbound(envelopeFromDelivery(delivery, who));
-        const out = await commands.run(cmd);
-        stats.commands = (stats.commands || 0) + 1;
-        // Commands don't go into the box or the conversation cold layer.
+        // 命令不进盒子、不进对话冷层 —— 那不是跟他说的话。
         const commandEnv = envelopeFromDelivery(delivery, who);
         const commandOutlet = makeOutlet({ outbound, router, plugins,
           currentTurn: () => ({ turnId: commandEnv.trace_id, inbound: commandEnv }) });
-        // Commands may carry buttons (e.g. a model picker); only Telegram supports them.
-        const cmdArgs = Array.isArray(out.buttons) && out.buttons.length ? { inline_keyboard: out.buttons } : {};
-        try { await commandOutlet.deliver({ intent: "send_text", text: out.text || "", args: cmdArgs, by: "command" }); }
+        // 慢命令先垫一句（/engine：「排上了，等这一轮说完」），回执照旧在最后
+        const say = async (text) => {
+          try { await commandOutlet.deliver({ intent: "send_text", text: String(text || ""), args: {}, by: "command" }); }
+          catch (e) { log("[命令] 先垫的那句发不出去：" + ((e && e.message) || e)); }
+        };
+        const out = await commands.run(cmd, { say });
+        stats.commands = (stats.commands || 0) + 1;
+        // 命令可以带一排按钮（`/model` 弹模型选单）；只有 TG 认，别的渠道出闸会明说没带上。
+        const hasButtons = Array.isArray(out.buttons) && out.buttons.length;
+        const canButtons = require("./surface").PLUGIN_EXTRAS.inline_keyboard.includes(channel);
+        const cmdArgs = hasButtons && canButtons ? { inline_keyboard: out.buttons } : {};
+        // 没按钮的渠道（微信/iMessage）把选项写成文字，照着手打（10-21 Alice）
+        const cmdText = (out.text || "") + (hasButtons && !canButtons ? buttonsAsText(out.buttons) : "");
+        try { await commandOutlet.deliver({ intent: "send_text", text: cmdText, args: cmdArgs, by: "command" }); }
         catch (e) { log("[命令] 回执发不出去：" + ((e && e.message) || e)); }
         return { accepted: true, command: cmd.name, ok: out.ok !== false, text: out.text };
       }
@@ -273,16 +285,16 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       }
       if (media) await media.hydrate(delivery, plugin);
 
-      // ——— Groups: wake · buffer · batch ———
+      // ——— 群那一套：叫醒 · 攒着 · 批量 ———
       let groupBatch = null;
       if (isGroup) {
         const d = groups.decide(delivery, { identity: who, ownerIdentity: owner });
         groups.buffer(delivery, {
           speaker: delivery.senderName || delivery.senderId,
-          isOwner: who === owner,          // computed from the real id, not the nickname
+          isOwner: who === owner,          // ← 真实 id 算出来的，不是昵称
         });
         if (!d.wake) {
-          // Buffered, not dropped: on wake-up the agent sees what happened in between.
+          // **不是丢掉，是攒着。** 他醒来那一刻要看见这中间发生了什么。
           stats.groupBuffered = (stats.groupBuffered || 0) + 1;
           return { accepted: true, buffered: true, reason: d.reason,
             unread: groups.unreadCount(delivery) };
@@ -297,7 +309,7 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       const res = inbound.accept(delivery);
       stats.in += 1;
       if (!res.accepted) {
-        // Unknown identity → not delivered; never defaulted to the owner.
+        // 认不出人就不投递 —— **绝不硬填成她**。
         stats.blocked += 1;
         return { accepted: false, reason: "unknown_identity", event: res.event };
       }
@@ -313,13 +325,13 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     },
 
     /**
-     * Push a turn from outside the bridge (check-in, reminder, ...). Same path, no channel origin.
-     * Whether to push now is the caller's decision (ask `busy()`); this method doesn't decide,
-     * so an agent-initiated message isn't silently blocked by a quiet window.
+     * 桥外面的东西推一轮（check-in、提醒…）。走同一条路，只是没有渠道来路。
+     * ⚠️ **要不要现在推由调用方判断**（拿 `busy()` 问一句）—— 这儿不替它决定，
+     * 否则「他自己想说话」这种也会被静默窗挡掉，而那不该挡。
      */
     push: pushSystem,
 
-    /** A bridge notice for the owner (waterline trim / auto-rotation receipts). Sent via the last-active route; not into the box or the cold layer. */
+    /** 桥自己有话跟她说（水位裁剪/自动换舱的回执）。走她最近活跃的那条路，不进盒子、不进冷层。 */
     async tellOwner(text, { by = "bridge" } = {}) {
       const turnId = "sys-" + require("crypto").randomUUID();
       const outlet = makeOutlet({ outbound, router, plugins, currentTurn: () => ({ turnId, inbound: null }) });
@@ -327,8 +339,8 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     },
 
     /**
-     * The bridge's single outlet. The tool side only gets this, and it has no "recipient"
-     * parameter — the destination cannot be chosen there.
+     * **桥对外唯一的投递口**（铁律 2）。工具那侧只拿这个，
+     * 参数里没有「发给谁」—— 想指定也指定不了。
      */
     outlet: makeOutlet({
       outbound, router, plugins,
@@ -340,17 +352,19 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     }),
 
     /**
-     * Is a turn in flight? That's all it answers.
+     * 现在有没有轮在飞。**只答这个。**
      *
-     * Other timing policies belong to producers (e.g. a check-in producer decides itself that
-     * "the owner just spoke" means skip). This only guards against technical collisions:
-     * pushing a turn mid-reply would scramble the queue and routing.
+     * 别的时机判断**归生产者自己** —— 比如「她刚说过话，这次 check-in 没意义」
+     * 是在 `src/producers/checkin.js` 里判的，投都不投（Alice 2026-09-18：
+     *「是从脚本那里就直接丢掉」）。桥不认识各个生产者的时机策略。
+     *
+     * 这里只挡**技术撞车**：他正说着话再塞一轮进去，排队会乱、来路会串。
      */
     busy() {
       return queue.busy() ? { busy: true, why: "盒子正在处理一轮" } : { busy: false, why: "" };
     },
     progress: () => queue.progress(),
-    /** Which turn is running (threadId/turnId) — the tool socket uses it to find the turn's origin */
+    /** 现在在跑的是哪一轮（threadId/turnId）—— 工具口靠它找这轮的来路 */
     activeTurn: () => {
       const row = queue.context();
       return row ? { threadId: row.threadId || "", turnId: row.turnId || "" } : null;
@@ -365,17 +379,18 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     },
 
     held: () => held.slice(),
-    /** Undelivered ledger (failed / unknown sends). */
+    /** 没送到的账（发不出去 / 不知道发没发）。不给就没有。 */
     undelivered: () => undelivered,
-    /** Command table: the host registers its own commands here. */
+    /** 命令表：宿主往这儿注册自己的命令，桥不认识它们叫什么。 */
     commands,
     stats: () => ({ ...stats }),
 
     /**
-     * Attach a self-polling leg: fetch → main loop → box → outbound → send.
+     * 给某条腿装上「自己去捞」。装完这条腿就是活的：
+     * 捞 → 主循环 → 盒子 → 出闸 → 发回去，中间不用人手喂。
      *
-     * Cursor and dead-letter paths are provided by the caller. Returns the receiver; the
-     * caller decides when to `run()` / `stop()` — the bridge never starts background loops.
+     * 游标和死信的路径**由调用方给**（铁律 1）。返回收信人，调用方决定
+     * 什么时候 `run()`、什么时候 `stop()` —— 桥不自己起后台循环。
      */
     attach({ channel, cursorFile, deadLetterFile, enabled = () => true, log: legLog = log }) {
       const plugin = plugins.get(channel);
@@ -385,8 +400,8 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
         cursor: makeCursorStore({ file: cursorFile }),
         deadLetter: makeDeadLetter({ file: deadLetterFile }),
         log: legLog, enabled,
-        // Consuming a raw record = running it through the main loop. Only a throw counts as
-        // failure (→ dead letter); "blocked: unknown identity" is a completed outcome, not a fault.
+        // 一条原始记录怎么消化 = 走主循环。**抛错才算没消化成**（进死信）；
+        // 「认不出人挡下了」不抛错 —— 那是处理完了的结论，不是故障。
         handle: (raw) => api.ingest({ channel, raw }),
       });
     },
@@ -394,4 +409,13 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
   return api;
 }
 
-module.exports = { makePipeline, envelopeFromEvent, renderGroupBatch };
+/** 按钮 → 文字选项（每行一条：「标签：/命令 参数」）。没有 callback_data 的跳过。 */
+function buttonsAsText(rows) {
+  const lines = [];
+  for (const row of rows) for (const b of (Array.isArray(row) ? row : [row])) {
+    if (b && b.callback_data) lines.push(`  ${b.text || ""}：${b.callback_data}`);
+  }
+  return lines.length ? "\n\n可选（照着发）：\n" + lines.join("\n") : "";
+}
+
+module.exports = { buttonsAsText, makePipeline, envelopeFromEvent, renderGroupBatch };

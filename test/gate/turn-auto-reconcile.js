@@ -1,7 +1,7 @@
 "use strict";
 
-// After a restart: turns provably completed are settled automatically; others wait for a human.
-// The reverse ("never ran") is never decided automatically - a wrong call means duplicate delivery.
+// 重启之后：能证明「已经跑完」的自动认掉；证明不了的原样留着等人。
+// 反向（判定「没跑过」）永远不自动做 —— 判错就是重复投递。
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -24,7 +24,7 @@ const env = (id) => ({ trace_id: id, text: "hi " + id });
 const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } });
 
 (async () => {
-  // a ledger with unknown rows left over from before a restart
+  // 造一份「重启前留下 unknown」的账本
   const file = path.join(root, "turns.json");
   {
     const box = makeBox();
@@ -35,7 +35,7 @@ const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } 
   }
   ok("提交后结果不明 → unknown");
 
-  // 1) no reconciler: unknown blocks the queue
+  // 1) 没有 reconciler：unknown 挡着，后面的任务一条都不投（原行为不变）
   {
     const box = makeBox();
     const q = makeTurnQueue({ file, box, onReply: async () => {}, onDone: async () => {} });
@@ -45,7 +45,7 @@ const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } 
   }
   ok("没有证据来源时：照旧停下等人");
 
-  // 2) reconciler without evidence: still blocked
+  // 2) reconciler 拿不出证据：也不许自动放行
   {
     const box = makeBox();
     const q = makeTurnQueue({ file, box, onReply: async () => {}, onDone: async () => {},
@@ -56,7 +56,7 @@ const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } 
   }
   ok("证明不了 → 保持 unknown，不猜");
 
-  // 3) reconciler with evidence: settled, queue continues
+  // 3) reconciler 给出证据：认掉，队列继续跑
   {
     const box = makeBox();
     const q = makeTurnQueue({ file, box, onReply: async () => {}, onDone: async () => {},
@@ -70,7 +70,7 @@ const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } 
   }
   ok("有证据 → 自动认定 completed，并带上证据和来源");
 
-  // 4) a throwing reconciler must not crash the bridge; log only
+  // 4) reconciler 抛错不许把桥带崩，只留日志
   {
     const file2 = path.join(root, "turns2.json");
     const boom = makeBox();
@@ -88,7 +88,7 @@ const route = () => ({ ok: true, target: { platform: "telegram", chat_id: "1" } 
   }
   ok("证据源抛错 → 留日志、保持 unknown");
 
-  // 5) an empty evidence string is not evidence
+  // 5) 空证据字符串不算证据
   {
     const file3 = path.join(root, "turns3.json");
     const boom = makeBox();

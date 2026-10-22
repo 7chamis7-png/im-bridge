@@ -1,5 +1,5 @@
 "use strict";
-/** Kill switch: anything unreadable counts as off. Runs in an isolated dir. */
+/** 一键回退开关：读不到一律回老路。隔离跑，不碰生产。 */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -17,15 +17,15 @@ const check = (n, g, w) => {
 let clock = 0;
 const ks = new KillSwitch({ flagFile: flag, ttlMs: 1000, now: () => clock });
 
-console.log("\n[1] 默认关着——文件不在就不接管（fail-safe）");
+console.log("\n[1] 默认关着——文件不在就走老路（fail-safe）");
 check("没文件 = 关", ks.enabled(), false);
 
-console.log("\n[2] 放文件 = 桥接管");
+console.log("\n[2] 放文件 = 新桥接管");
 fs.writeFileSync(flag, "");
 clock += 2000;
 check("有文件 = 开", ks.enabled(), true);
 
-console.log("\n[3] 删文件 = 下一轮就停止接管，不用重启");
+console.log("\n[3] 删文件 = 下一轮就回老路，不用重启");
 fs.unlinkSync(flag);
 clock += 2000;
 check("删掉 = 关", ks.enabled(), false);
@@ -44,10 +44,10 @@ check("指向目录不是文件 = 关", ks3.enabled(), false);
 
 console.log("\n[6] 只在状态变化时出日志，不刷屏");
 const ks4 = new KillSwitch({ flagFile: flag, ttlMs: 0, now: () => clock });
-check("第一次有话说", /bridge enabled/.test(ks4.transition() || ""), true);
+check("第一次有话说", /已接管/.test(ks4.transition() || ""), true);
 check("状态没变就闭嘴", ks4.transition(), null);
 fs.unlinkSync(flag);
-check("变回去了才再出一行", /bridge disabled/.test(ks4.transition() || ""), true);
+check("变回去了才再出一行", /走老路/.test(ks4.transition() || ""), true);
 
 console.log(`\n通过 ${pass} / 失败 ${fail}   (隔离目录 ${root})`);
 process.exit(fail ? 1 : 0);

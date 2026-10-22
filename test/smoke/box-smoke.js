@@ -1,9 +1,8 @@
 'use strict';
-// Smoke test: real CLI + real box (makeClaudeCodeBox) + adapter, isolated directory, haiku.
-// Not part of `npm test` (it calls the real model). Usage: start a test im-cli host with
-// AGENT_CLI_SOCKET pointing into an isolated directory, then
-//   AGENT_CLI_SOCKET=... GATE_ROOT=... node test/smoke/box-smoke.js
-// Never point it at a production socket/session.
+// 真 CLI + 真盒子（makeClaudeCodeBox）+ 适配层，隔离目录，haiku。
+// 跑法：先起一个测试用的 nova-cli 宿主（NOVA_CLI_SOCKET 指到隔离目录），再
+//       NOVA_CLI_SOCKET=... GATE_ROOT=... node test/smoke/box-smoke.js   （花钱很少；绝不碰Nova的会话）
+// 2026-09-20 晚：适配层只认远端 nova-cli，这个冒烟不再自己起 CLI。
 const fs = require('node:fs');
 const path = require('node:path');
 const assert = require('node:assert/strict');
@@ -11,9 +10,9 @@ const { execFileSync } = require('node:child_process');
 const { makeClaudeCodeBox } = require('../../src/host/gate-box-claudecode');
 const { makeEnvelope } = require('../../src/gate/envelope');
 const { createImBridgeRuntimeAdapter } = require('../../adapters/box-runtime');
-if (!process.env.AGENT_CLI_SOCKET) { console.error('Start a test im-cli host first and set AGENT_CLI_SOCKET to its socket (never a production one).'); process.exit(2); }
+if (!process.env.NOVA_CLI_SOCKET) { console.error('要先起测试用 nova-cli，并把 NOVA_CLI_SOCKET 指过去（别连生产那条）'); process.exit(2); }
 
-const ROOT = process.env.SMOKE_ROOT || path.join(require('node:os').tmpdir(), 'imb-smoke');
+const ROOT = process.env.SMOKE_ROOT || '/tmp/claude-0/imb-smoke';
 fs.rmSync(ROOT, { recursive: true, force: true });
 const ws = path.join(ROOT, 'ws');
 const state = path.join(ROOT, 'state');
@@ -21,7 +20,7 @@ fs.mkdirSync(ws, { recursive: true }); fs.mkdirSync(state, { recursive: true });
 fs.writeFileSync(path.join(ws, 'CLAUDE.md'), '# 项目说明\n本项目的暗号是：蓝鲸。有人问暗号就回答蓝鲸。\n');
 const sp = path.join(ROOT, 'system.md');
 fs.writeFileSync(sp, '你的名字叫阿七。回答一律用中文，简短。\n');
-// 32x32 red PNG
+// 2x2 红色 PNG
 const png = path.join(ROOT, 'red.png');
 execFileSync('python3', ['-c', `
 import zlib,struct
@@ -40,6 +39,7 @@ const cfg = () => ({
   claudeExtraArgs: ['--system-prompt-file', sp, '--fallback-model', 'claude-sonnet-4-5', '--mcp-config', pingCfg],
   claudePermissionMode: 'acceptEdits', claudeDisableVerbose: false,
 });
+delete process.env.FORGE_ENABLED;
 process.env.GATE_CLAUDE_PARTIAL = 'on';
 
 function build() {
@@ -47,7 +47,7 @@ function build() {
   const box = makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot: ws, model: 'claude-haiku-4-5-20251001',
     log: (m) => { if (m.includes('[许可]')) approvalLog.push(m); console.log('  [box] ' + m); } });
   const replies = []; const dones = [];
-  box.onReply((e) => { replies.push(e); console.log(`  ← ${e.genuine ? '' : '[not genuine] '}${e.text.slice(0, 80)}`); });
+  box.onReply((e) => { replies.push(e); console.log(`  ← ${e.genuine ? '' : '[非他本人] '}${e.text.slice(0, 80)}`); });
   box.onTurnDone((e) => { dones.push(e); });
   return { runtime, box, replies, dones };
 }

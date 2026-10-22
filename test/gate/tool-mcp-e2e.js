@@ -1,14 +1,14 @@
 "use strict";
 /**
- * Tool layer end-to-end: agent calls a tool -> bridge delivers -> result returns to the agent.
+ * 工具层端到端（2026-09-18）：**他调工具 → 桥替他发 → 结论回到他手里**
  *
  * 跑的是真零件：真 MCP 壳（子进程，走 stdio）、真 unix socket、真出闸、真冷层。
  * 只有插头是假的（不真发到平台）。
  *
- * It answers three questions:
- *   · does the bridge record what the agent said via a tool (cold log + ledger)?
- *   · if the user spoke on WeChat, does the agent's voice stay on WeChat (not leak to Telegram)?
- *   · when something can't be delivered, is the agent told (no silent rerouting)?
+ * 这个文件回答三个今天栽过的问题：
+ *   · 他调工具，桥知不知道他说过话（老桥：不知道，冷层是空的，一换舱就失忆）
+ *   · 她在微信说话，他的语音会不会跑去 TG（老桥：会）
+ *   · 发不出去的时候，他被告知了吗（老桥：没有，静默改投）
  */
 const assert = require("assert");
 const fs = require("fs");
@@ -43,8 +43,8 @@ const TEXT_ONLY = { ...ALL, send_voice: "unsupported" };
     plugins: new Map([["wechat", mkPlugin("wechat", TEXT_ONLY)], ["telegram", mkPlugin("telegram", ALL)]]) });
   const binding = new TurnBinding({ file: path.join(root, "binding.json") });
 
-  // 这一轮是用户从**微信**发来的
-  binding.bind("th-1", "turn-1", { eventId: "ev-1", channel: "wechat", chatId: "wxid_owner", accountId: "wx" });
+  // 这一轮是她从**微信**发来的
+  binding.bind("th-1", "turn-1", { eventId: "ev-1", channel: "wechat", chatId: "Alice-wx", accountId: "wx" });
 
   const sockFile = path.join(root, "tools.sock");
   const socket = makeToolSocket({
@@ -77,31 +77,31 @@ const TEXT_ONLY = { ...ALL, send_voice: "unsupported" };
   const list = await rpc("tools/list", {}, 2);
   const names = list.result.tools.map((t) => t.name).sort();
   assert.deepEqual(names, ["call", "hang_up", "react", "reply", "send_file", "send_image", "send_sticker", "send_voice"]);
-  ok("agent 看得见目录里的工具（扔个文件就多一个）");
+  ok("他看得见目录里的工具（扔个文件就多一个）");
   assert.ok(list.result.tools.every((t) => !/telegram|wechat/.test(t.name)));
   ok("工具名里没有渠道 —— 名字是意图不是地址");
 
-  // ① no channel -> reply goes back the way the turn came (WeChat)
+  // ① 不给 channel → 原路返回微信（老桥这里会发去 TG）
   const r1 = await rpc("tools/call", { name: "reply", arguments: { text: "我在" } }, 3);
   const o1 = JSON.parse(r1.result.content[0].text);
   assert.equal(o1.outcome, "sent");
   assert.equal(sent.at(-1).channel, "wechat");
-  ok("不给渠道 → 原路回微信（用户在哪说的就回哪）");
+  ok("不给渠道 → 原路回微信（她在哪说的就回哪）");
 
-  // ② 桥知道 agent 说过话 —— 冷层有，账本也有
+  // ② 桥知道他说过话 —— 冷层有，账本也有
   const coldRows = fs.readFileSync(path.join(root, "cold.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
   assert.ok(coldRows.some((r) => r.role === "assistant" && r.text === "我在"));
-  ok("**冷层记下了**");
+  ok("**冷层记下了**（老桥这里是空的，一换舱就失忆）");
 
-  // ③ 用户要求"发我 TG" → 听 agent 的，地址由桥查
+  // ③ 她让他"发我 TG" → 听他的，地址由桥查
   const r2 = await rpc("tools/call", { name: "reply", arguments: { text: "发这边", channel: "telegram" } }, 4);
   const o2 = JSON.parse(r2.result.content[0].text);
   assert.equal(o2.outcome, "sent");
   assert.equal(sent.at(-1).channel, "telegram");
   assert.equal(sent.at(-1).chatId, "861");
-  ok("指定渠道 → 听 agent 的，地址桥自己查出来");
+  ok("指定渠道 → 听他的，地址桥自己查出来");
 
-  // ④ 微信发不了语音 → 明确告诉 agent，**不静默改投 TG**
+  // ④ 微信发不了语音 → 明确告诉他，**不静默改投 TG**
   const before = sent.length;
   const r3 = await rpc("tools/call", { name: "send_voice", arguments: { text: "晚安" } }, 5);
   const o3 = JSON.parse(r3.result.content[0].text);

@@ -1,6 +1,6 @@
 "use strict";
 /**
- * The iMessage leg is push-based, not polled.
+ * iMessage 这条腿是**推**不是捞（2026-09-18）
  * 盯的是：推来的落盘（崩了不丢）、poll 交出去、游标推进后清盘、坏文件不卡住。
  */
 const fs = require("fs");
@@ -64,7 +64,7 @@ const files = (d) => { try { return fs.readdirSync(d).filter((f) => /^\d{12}\.js
     const p = new IMessagePlugin({});
     let msg = "";
     try { p.receive({ text: "x" }); } catch (e) { msg = e.message; }
-    check("收的时候当场报", /no default is guessed|不许用默认值猜/.test(msg), true);
+    check("收的时候当场报", /不许用默认值猜/.test(msg), true);
     check("poll 不炸，只是没东西", (await p.poll({})).items, []);
   }
 

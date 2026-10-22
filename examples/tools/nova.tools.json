@@ -1,0 +1,28 @@
+{
+  "_说明": "Nova的工具配置 —— 放到 /root/.nova-gate/tools.json。2026-10-21 起工具住在桥里（src/toolbox/registry.js），这份只写他自己的目录、钥匙文件在哪、哪几包要特殊照顾。钥匙的值不写这里。",
+  "_对照": "照 10-21 生产原样：/root/nova/.mcp.json 8 包 + /root/.nova-gate/mcp-extra.json 8 包，路径/env 一个不变。远程的 5 包（cedartoy/lmc5/aisay/garden/crotown）改走本地代理，工具名不变。",
+  "persona": "nova",
+  "personaFile": "/root/nova/Nova.md",
+  "_personaFile": "他的人格文件（原 /root/nova/CLAUDE.md，切换那天 mv 改名）。cli-host 起 CLI 时现读，拼在 nova-system-prompt.md 后面进系统提示。桥只读不写，内容归他自己。",
+  "vars": {
+    "STATE_DIR": "/root/.nova",
+    "WORKSPACE": "/root/nova",
+    "NODE": "/usr/local/bin/node",
+    "BROWSER_PROFILE": "/root/.cyberboss/browser-profile",
+    "STICKER_INBOX_DIRS": "/root/.nova-gate/files:/root/.nova-gate/phone-inbox:/root/.nova-gate/imessage-inbox:/root/.nova/inbox",
+    "LMC5_URL": "http://127.0.0.1:8100/mcp",
+    "STMEM_DIR": "/root/stone-memory-guisuo",
+    "STMEM_PROFILE": "guisuo-cold",
+    "STMEM_MAY_PROFILE": "guisuo-prequel-may-v2",
+    "IB_HOME": "/root/.nova/ib",
+    "SKILLS_DIRS": "/root/.nova/skills"
+  },
+  "_SKILLS_DIRS": "技能包（chuanda / gpt-image-2）原在 /root/nova/.claude/skills，切换那天 cp -rL 到这里（gpt-image-2 是相对软链，直接 mv 会断）。冒号分隔可给多个目录；关掉 = servers.skills.enabled:false。",
+  "secretsFiles": ["/root/.secrets/nova-bridge.env", "/root/.secrets/nova-tools.env"],
+  "servers": {
+    "notebook": {
+      "alwaysLoad": true,
+      "_为什么": "2026-09-20 定的常驻（他真实调用 70 次）。原样保留；要改成按需取就删掉这一节。"
+    }
+  }
+}

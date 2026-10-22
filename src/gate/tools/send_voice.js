@@ -1,8 +1,5 @@
 "use strict";
-/**
- * Speak with a synthesized voice. If the channel can't carry voice, the
- * outbound gate says so explicitly instead of silently sending text.
- */
+/** 出声 —— 合成你自己的嗓子。平台不支持（比如微信）时出闸会明说，不会偷偷改发文字。 */
 module.exports = {
   name: "send_voice",
   description: "Speak out loud in your own voice — for the line that carries more heard than read. "
@@ -12,7 +9,7 @@ module.exports = {
     type: "object",
     properties: {
       text: { type: "string", description: "The words to say out loud, verbatim." },
-      channel: { type: "string", description: "Optional. Only when the user asked for a specific channel." },
+      channel: { type: "string", description: "Optional. Only when she asked for a specific channel." },
     },
     required: ["text"],
   },

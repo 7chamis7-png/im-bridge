@@ -1,33 +1,29 @@
 "use strict";
 
 /**
- * Undo a turn: remove the turn's effect on everything that follows, not just a file.
+ * 撤销一轮 —— **撤的是「这一轮对后续的影响」，不是删个文件**（2026-09-18 Alice定的规格）
  *
- * Organized in three parts:
- *   1. Context and memory: CLI history, main cold layer, shadow copy, and the
- *      summaries / handoff packages derived from them.
- *   2. Queues and derived files: pending, outbox, retries, turn bindings,
- *      generated voice and attachments. Ingestion cursors and ids never move
- *      backwards or get reused; body-less tombstones keep old messages out.
- *   3. External actions: sent messages, created reminders, modified files are
- *      each marked "undone / cannot undo / needs attention". Deleting history
- *      is never presented as undoing an external action.
+ * 她的原话分三块，这个文件就按这三块组织：
+ *   1. 上下文与记忆：CLI 历史、主冷层、影子副本，以及由它们生成的摘要 / 交接包 / 长期记忆
+ *   2. 队列与派生文件：待处理、发送队列、重试、轮次绑定、生成的语音和附件
+ *      —— **采集游标和编号不倒退、不复用**，留无正文的撤销标记防旧消息重新进来
+ *   3. 外部动作与验收：已发出去的消息、已建的提醒、已改的文件，分别标
+ *      「已撤销 / 无法撤销 / 待处理」，**不许拿删历史冒充撤销动作**
  *
- * Two targets: the last turn (`last`) or back to before a given message
- * (`before`). Both show the scope first.
- * Two modes:
- *   undo   regular undo — full backup before touching anything
- *   purge  hard delete — no body backup; only a body-less audit record remains
+ * 两个入口：撤销上一轮（`last`）、回到指定消息之前（`before`）。**两个都先给影响范围**。
+ * 两档力度：
+ *   undo   普通撤销 —— 动手前整份备份，后悔得回来
+ *   purge  彻底删除 —— **连正文备份一起清**，只留不含正文的操作审计
  *
- * Lives in host/, not gate/: it touches both the CLI transcript (backend) and
- * the bridge ledgers (bridge); only the host knows both sides.
+ * ⚠️ 这个文件住在 host/ 不在 gate/：它要同时动 CLI 的 transcript（底座的东西）
+ *    和桥的账本（桥的东西），只有宿主同时认识这两边。桥不认识 transcript 是什么。
  */
 
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 
-/** The CLI turns the workspace path into a dir name by replacing `/` and `.` with `-` (must match the box). */
+/** CLI 把工作目录变成目录名时**斜杠和点号都换成横线**（跟盒子那份必须一致）。 */
 function transcriptPathOf(workspaceRoot, threadId) {
   const slug = String(workspaceRoot || "").replace(/[/.]/g, "-");
   return path.join(os.homedir(), ".claude", "projects", slug, String(threadId) + ".jsonl");
@@ -46,32 +42,31 @@ function readJson(file, fallback) {
   try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return fallback; }
 }
 
-/** Write a temp file then rename, so a crash never leaves a half-written ledger. */
+/** 先写临时文件再 rename —— 半路断电也不会留半截账本。 */
 function writeAtomic(file, text) {
   const tmp = file + ".tmp-" + process.pid;
   fs.writeFileSync(tmp, text, { mode: 0o600 });
   fs.renameSync(tmp, file);
 }
 
-/** Short local timestamp (MM-DD HH:mm) in the host time zone (set TZ to change it). */
-function localStamp(iso) {
+/** 跟她说时间一律北京时间 —— 服务器时区不是她的时区，别让她自己加减。 */
+function beijing(iso) {
   const d = new Date(iso);
   if (Number.isNaN(d.getTime())) return String(iso || "");
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  return new Date(d.getTime() + 8 * 3600 * 1000).toISOString().replace("T", " ").slice(5, 16) + " 京";
 }
 
-/** Message bodies never leave the return value; display summaries are truncated. */
+/** 正文一律不进返回值以外的地方；展示用的摘要截短。 */
 function brief(text, max = 40) {
   const t = String(text || "").replace(/\s+/g, " ").trim();
   return t.length <= max ? t : t.slice(0, max) + "…";
 }
 
-// ───────────────────────── 1. Which turns ─────────────────────────
+// ───────────────────────── 1. 这一轮都有谁 ─────────────────────────
 
 /**
- * Bridge side: read events.jsonl as one entry per turn.
- * A turn = one inbound `kind:"user_input"` event plus everything derived from it.
+ * 桥这头：把 events.jsonl 读成「一轮一条」。
+ * 一轮 = 一条 `kind:"user_input"` 的入站事件，及其所有派生（回复、投递、账）。
  */
 function readTurns(gateRoot) {
   const rows = readJsonl(path.join(gateRoot, "events.jsonl"));
@@ -79,7 +74,7 @@ function readTurns(gateRoot) {
   for (const r of rows) {
     const o = r.obj;
     if (!o || o.kind !== "user_input" || !o.eventId) continue;
-    if (turns.has(o.eventId)) continue;          // logged twice (registered / delivered)
+    if (turns.has(o.eventId)) continue;          // 同一条会被登记两次（registered / delivered）
     turns.set(o.eventId, {
       eventId: o.eventId,
       nativeId: o.nativeId == null ? "" : String(o.nativeId),
@@ -93,9 +88,9 @@ function readTurns(gateRoot) {
 }
 
 /**
- * Select the turns to undo.
+ * 要撤哪几轮。
  * @param {object} target `{kind:"last"}` / `{kind:"before", nativeId}` / `{kind:"event", eventId}`
- *   `before` includes the given message itself ("back to before that message").
+ *   before 的语义是**她说的那条消息本身也一起撤**（「回到指定消息之前」）。
  */
 function selectTurns(all, target) {
   if (!all.length) return { ok: false, why: "账本里一轮都没有" };
@@ -111,9 +106,9 @@ function selectTurns(all, target) {
   return { ok: false, why: "不认识的撤销目标：" + t.kind };
 }
 
-// ───────────────────────── 2. CLI history ─────────────────────────
+// ───────────────────────── 2. CLI 历史那一段 ─────────────────────────
 
-/** Whether this line starts an inbound turn (the bridge-sent message wrapped in `<channel …>`). */
+/** 这一行是不是「她说的一整轮」的开头（桥送进去的那条，带 `<channel …>` 包装）。 */
 function isInboundLine(o) {
   if (!o) return false;
   if (o.type === "queue-operation" && typeof o.content === "string") return o.content.includes("<channel source=");
@@ -125,7 +120,7 @@ function isInboundLine(o) {
   return false;
 }
 
-/** Text of an inbound line (queue-operation: content; user line: message.content). */
+/** 入站行的正文（queue-operation 在 content，真正的 user 行在 message.content）。 */
 function inboundText(o) {
   const m = o && o.message;
   const c = m ? m.content : (o ? o.content : "");
@@ -143,13 +138,13 @@ function inboundLineMatches(o, nativeId) {
   return false;
 }
 
-/** Refusal: a synthetic message, not something the model actually said. */
+/** 拒答：合成消息，不是模型真说的话。 */
 function isRefusalLine(o) {
   const m = o && o.message;
   return Boolean(m && m.role === "assistant" && (m.stop_reason === "refusal" || m.model === "<synthetic>"));
 }
 
-/** Trailing consecutive refusals; parentUuid must still be relinked after removal. */
+/** 末尾连着的那几条拒答（以及前面那半轮），删完照样要接上 parentUuid。 */
 function refusalRange(rows) {
   let end = rows.length - 1;
   while (end >= 0 && !isRefusalLine(rows[end].obj)) end -= 1;
@@ -172,21 +167,21 @@ function refusalRange(rows) {
 }
 
 /**
- * Locate the transcript lines belonging to these turns.
+ * 在 transcript 里圈出这几轮的行。
  *
- * Removing lines requires relinking parentUuid: otherwise `resume` follows a
- * broken chain and silently loads only the tail of the conversation. So the
- * plan includes "who links to whom afterwards", not just line numbers.
+ * ⚠️ **删行必须接上 parentUuid**（2026-09-18 的真事：Grok 切拒答没接，
+ *    Nova resume 只装回 87 条、292k 变 53k，他自己以为换舱了）。所以这儿要连
+ *    「删完之后谁接谁」一起算出来，不是只给一串行号。
  */
 function planTranscript({ workspaceRoot, threadId, turns }) {
   const file = transcriptPathOf(workspaceRoot, threadId);
   const rows = readJsonl(file);
   if (!rows.length) return { file, exists: false, lines: [], relink: null, tools: [], unmatched: turns.map((t) => t.nativeId) };
 
-  // Split the transcript into turns; inbound lines are the boundaries.
-  // A turn has two inbound lines (queue-operation enqueue + the user line) with
-  // the same message_id. Using "next inbound line" as the end would split a turn
-  // in half and leave the reply in place.
+  // 先把整份 transcript 切成「一轮一段」：入站行就是段界。
+  // ⚠️ 同一轮**有两条入站行**（queue-operation 的 enqueue + 真正的 user 行），
+  //    它们的 message_id 一样。拿「下一条入站行」当段尾会把一轮切成两半 ——
+  //    第一版就是这么写的，结果只删掉 enqueue 那一行，他的答复原封不动留着。
   const marks = [];
   for (const r of rows) {
     if (!isInboundLine(r.obj)) continue;
@@ -198,18 +193,17 @@ function planTranscript({ workspaceRoot, threadId, turns }) {
     .map((t) => t.nativeId || t.eventId);
   const mine = marks.filter((m) => wanted.has(m.nativeId));
   if (!mine.length) {
-    // No anchor: typically the turn was not started by an inbound message (e.g. a
-    // producer-initiated turn that got refused), so there is no
-    // `<channel … message_id=…>` line. A refusal left in the history is sent again
-    // with every following turn, causing repeated refusals. Fall back to cutting
-    // the trailing `<synthetic>` / stop_reason=refusal lines.
+    // 锚点对不上 —— 最常见的是**这一轮不是她挑起的**（他自己的 check-in 轮被安全层拒了，
+    // transcript 里没有 `<channel … message_id=…>` 那条）。她要 /undo 的原头就是这个：
+    // 拒答留在历史里，下一轮带着它一起送上去，于是一拒再拒。
+    // 所以退一步按**拒答判据**切：连着的 `<synthetic>` / stop_reason=refusal 一起拿掉。
     const fb = refusalRange(rows);
     if (fb) return { file, exists: true, ...fb, unmatched, by: "拒答判据（没找到入站锚点）" };
     return { file, exists: true, lines: [], relink: null, tools: [], unmatched };
   }
 
   const from = mine[0].i;
-  // End: the first inbound line after the last selected one that is not selected
+  // 段尾：从最后一条属于这几轮的入站行往后，找**第一条不属于这几轮**的入站行
   const lastMine = mine[mine.length - 1].i;
   let to = rows[rows.length - 1].i;
   for (const m of marks) {
@@ -219,7 +213,7 @@ function planTranscript({ workspaceRoot, threadId, turns }) {
   const cut = rows.filter((r) => r.i >= from && r.i <= to);
   const lines = cut.map((r) => r.i);
 
-  // Tools called during these turns — used to list external actions
+  // 他这一轮调过哪些工具 —— 外部动作要靠它列账（发消息、写记忆、改文件都在这儿）
   const tools = [];
   for (const r of cut) {
     const content = r.obj && r.obj.message && r.obj.message.content;
@@ -229,7 +223,7 @@ function planTranscript({ workspaceRoot, threadId, turns }) {
     }
   }
 
-  // Relink after removal
+  // 删完之后谁接谁
   let prevUuid = null;
   for (const r of rows) {
     if (r.i >= from) break;
@@ -245,9 +239,9 @@ function planTranscript({ workspaceRoot, threadId, turns }) {
   return { file, exists: true, lines, relink, tools, unmatched };
 }
 
-// ───────────────────────── 3. Bridge ledgers ─────────────────────────
+// ───────────────────────── 3. 桥这头的账 ─────────────────────────
 
-/** Cold / shadow-cold records of these turns (matched via the eventId inside coldId). */
+/** 冷层 / 影子冷层里属于这几轮的记录（靠 coldId 里带的 eventId 认）。 */
 function planColdFile(file, ids) {
   const rows = readJsonl(file);
   const hit = rows.filter((r) => r.obj && ids.some((id) => String(r.obj.id || "").includes(id)));
@@ -265,7 +259,7 @@ function planEventsFile(file, ids) {
   return { file, exists: fs.existsSync(file), lines: hit.map((r) => r.i) };
 }
 
-/** Outbox: an operation belonging to a turn is removed entirely. */
+/** 发送队列：整条 operation 归属某一轮就整条撤。 */
 function planOutbox(gateRoot, ids) {
   const file = path.join(gateRoot, "outbox.json");
   const doc = readJson(file, null);
@@ -275,7 +269,7 @@ function planOutbox(gateRoot, ids) {
     const blob = [k, o.outputId, o.operationId, o.coldId, o.turnId].filter(Boolean).join(" ");
     return ids.some((id) => blob.includes(id));
   });
-  // Pending vs already sent — sent ones are external actions; removing them from the queue doesn't recall them
+  // 还没发出去的 vs 已经发出去的 —— 后者属于「外部动作」，删队列不等于撤回
   const pending = [], sent = [];
   for (const k of keys) {
     const o = ops[k] || {};
@@ -297,7 +291,7 @@ function planMapFile(file, ids, keyMatch) {
   return { file, exists: true, keys };
 }
 
-/** Summaries / handoff packages: flagged, never deleted automatically (they mix in other turns). */
+/** 摘要 / 交接包 / 长期记忆 —— 有就标出来，**不自动删**（混着别的有效内容）。 */
 function planDerived(gateRoot, ids) {
   const out = [];
   const handoff = path.join(gateRoot, "state", "handoff.json");
@@ -310,10 +304,10 @@ function planDerived(gateRoot, ids) {
   return out;
 }
 
-// ───────────────────────── Plan ─────────────────────────
+// ───────────────────────── 计划 ─────────────────────────
 
 /**
- * Compute what would change. Read-only; writes nothing.
+ * 先看会动什么。**这一步只读，不写任何文件。**
  * @returns {object} plan
  */
 function planUndo({ gateRoot, workspaceRoot, threadId, target = { kind: "last" } }) {
@@ -336,22 +330,22 @@ function planUndo({ gateRoot, workspaceRoot, threadId, target = { kind: "last" }
   const undelivered = planEventsFile(path.join(gateRoot, "undelivered.jsonl"), ids);
   const derived = planDerived(gateRoot, ids);
 
-  // Derived attachments: generated voice files referenced by the queue
+  // 派生附件：这一轮生成的语音（队列里引到的那些）
   const voice = [...new Set(outbox.pending.concat(outbox.sent).map((x) => x.voice).filter(Boolean))]
     .filter((p) => fs.existsSync(p));
 
-  // Cursors are read, never modified (no rewinding, no reuse)
+  // 游标**只看不动**：她定的「不倒退、不复用」
   const cursors = ["cursor-telegram.json", "cursor-wechat.json", "cursor-phone.json"]
     .map((n) => ({ file: path.join(gateRoot, n), value: readJson(path.join(gateRoot, n), null) }))
     .filter((c) => c.value);
 
   const external = {
-    // Already sent: removing from the queue does not remove it on the recipient's side
+    // 已经发出去的：删队列**不等于**对方那头消失
     sent: outbox.sent.map((s) => ({
       channel: s.channel, nativeId: s.nativeId,
-      verdict: s.channel === "telegram" && s.nativeId ? "可撤回（需确认后才去撤）" : "无法撤销（平台不支持或没记到号）",
+      verdict: s.channel === "telegram" && s.nativeId ? "可撤回（要你点头才去撤）" : "无法撤销（平台不支持或没记到号）",
     })),
-    // Tools used during the turn: memory writes, reminders, file edits, ...
+    // 他那一轮动过的工具：记忆、提醒、改文件都算
     tools: transcript.tools.map((t) => ({ name: t.name, at: t.at, verdict: "待处理（这个引擎不替别人的库做主）" })),
   };
 
@@ -378,15 +372,15 @@ function planUndo({ gateRoot, workspaceRoot, threadId, target = { kind: "last" }
   };
 }
 
-/** Human-readable plan, shown before anything is applied. */
+/** 把计划说成一段人话 —— 动手之前她先看这个。 */
 function describePlan(plan, { mode = "undo" } = {}) {
   if (!plan.ok) return "撤不了：" + plan.why;
   const L = [];
   L.push(mode === "purge" ? "🔥 **彻底删除**（连正文备份一起清，只留不含正文的审计）" : "↩️ 普通撤销（先整份备份，后悔得回来）");
   L.push(`要撤 ${plan.turns.length} 轮：`);
   for (const t of plan.turns.slice(0, 5)) {
-    const id = t.nativeId.length > 12 ? t.nativeId.slice(-8) : t.nativeId;   // shorten very long ids
-    L.push(`  · ${localStamp(t.at)} ${t.channel} #${id} 「${t.brief}」`);
+    const id = t.nativeId.length > 12 ? t.nativeId.slice(-8) : t.nativeId;   // 微信那种超长号只留尾巴
+    L.push(`  · ${beijing(t.at)} ${t.channel} #${id} 「${t.brief}」`);
   }
   if (plan.turns.length > 5) L.push(`  · …还有 ${plan.turns.length - 5} 轮`);
   L.push("");
@@ -417,11 +411,11 @@ function describePlan(plan, { mode = "undo" } = {}) {
     for (const s of plan.external.sent) L.push(`  · 已发出 ${s.channel} #${s.nativeId} → ${s.verdict}`);
     const byName = {};
     for (const t of plan.external.tools) byName[t.name] = (byName[t.name] || 0) + 1;
-    for (const [n, k] of Object.entries(byName)) L.push(`  · 调过 ${n} ×${k} → 待处理（这个引擎不替别人的库做主）`);
+    for (const [n, k] of Object.entries(byName)) L.push(`  · 他调过 ${n} ×${k} → 待处理（这个引擎不替别人的库做主）`);
   }
   if (plan.footprint.transcript.by) {
     L.push("");
-    L.push(`ℹ️ CLI 历史那段是按「${plan.footprint.transcript.by}」圈的 —— 这一轮不是由入站消息发起的（例如主动发起的轮被拒答了）。`);
+    L.push(`ℹ️ CLI 历史那段是按「${plan.footprint.transcript.by}」圈的 —— 这一轮不是你挑起的（他自己那轮被拒了）。`);
   }
   if (plan.footprint.transcript.unmatched.length) {
     L.push("");
@@ -430,7 +424,7 @@ function describePlan(plan, { mode = "undo" } = {}) {
   return L.join("\n");
 }
 
-// ───────────────────────── Apply ─────────────────────────
+// ───────────────────────── 执行 ─────────────────────────
 
 function dropLines(file, lineNumbers) {
   if (!lineNumbers.length) return 0;
@@ -443,12 +437,12 @@ function dropLines(file, lineNumbers) {
 }
 
 /**
- * Apply the plan.
+ * 真动手。
  *
  * @param {object} o
- * @param {object} o.plan     result of planUndo (must be freshly computed)
- * @param {string} o.mode     "undo" (keeps a backup) | "purge" (no body backup)
- * @param {boolean} [o.recallSent] also recall sent messages (default false — external actions need confirmation)
+ * @param {object} o.plan     planUndo 的产物（**必须是刚算的**，见 stale 检查）
+ * @param {string} o.mode     "undo"（留备份）| "purge"（连正文备份一起清）
+ * @param {boolean} [o.recallSent] 顺带去撤回已经发出去的消息（默认 false —— 对外动作要她点头）
  * @param {function} [o.now]
  */
 function applyUndo({ plan, mode = "undo", now = () => new Date() }) {
@@ -457,7 +451,7 @@ function applyUndo({ plan, mode = "undo", now = () => new Date() }) {
   const gateRoot = plan.gateRoot;
   const done = { backup: "", removed: {}, tombstones: 0 };
 
-  // undo: full backup first. purge: no body backup.
+  // —— 普通撤销：动手前整份备份。彻底删除：**不留正文备份**（她定的）——
   const touched = [
     plan.footprint.transcript.exists ? plan.footprint.transcript.file : "",
     plan.footprint.cold.exists ? plan.footprint.cold.file : "",
@@ -474,43 +468,43 @@ function applyUndo({ plan, mode = "undo", now = () => new Date() }) {
     const dir = path.join(gateRoot, "undo-backups", stamp);
     fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     for (const f of touched) {
-      // Not basename: `cold.jsonl` and `shadow/cold.jsonl` would collide and one
-      // backup would overwrite the other.
+      // ⚠️ 不能用 basename：`cold.jsonl` 和 `shadow/cold.jsonl` 会撞名，
+      //    后拷的把先拷的盖掉，备份里就少了一份正文（第一版真这么丢过）。
       const rel = path.relative(gateRoot, f).replace(/[/\\]/g, "-") || path.basename(f);
-      try { fs.copyFileSync(f, path.join(dir, rel)); } catch { /* missing: skip */ }
+      try { fs.copyFileSync(f, path.join(dir, rel)); } catch { /* 没有就算了 */ }
     }
     done.backup = dir;
   }
 
-  // 1. CLI history: remove lines + relink parentUuid
+  // —— 1. CLI 历史：删行 + **接上 parentUuid** ——
   const tr = plan.footprint.transcript;
   if (tr.exists && tr.lines.length) {
     const rows = fs.readFileSync(tr.file, "utf8").split("\n");
     if (tr.relink) {
       try {
         const o = JSON.parse(rows[tr.relink.line]);
-        o.parentUuid = tr.relink.parentUuid;     // write null too: it becomes the new head
+        o.parentUuid = tr.relink.parentUuid;     // null 也要写：那表示它成了新的头
         rows[tr.relink.line] = JSON.stringify(o);
-      } catch { /* malformed line: skip */ }
+      } catch { /* 那行本来就坏，跳过 */ }
     }
     const drop = new Set(tr.lines);
     writeAtomic(tr.file, rows.filter((_, i) => !drop.has(i)).join("\n"));
     done.removed.transcript = tr.lines.length;
   }
 
-  // 2. cold layer / shadow
+  // —— 2. 冷层 / 影子 ——
   for (const [k, f] of [["cold", plan.footprint.cold], ["shadowCold", plan.footprint.shadowCold]]) {
     if (f.exists && f.lines.length) done.removed[k] = dropLines(f.file, f.lines);
   }
 
-  // 3. event ledger: undo keeps it and appends tombstones; purge removes the lines
+  // —— 3. 事件账本：普通撤销留着打标记，彻底删除连正文一起清 ——
   for (const [k, f] of [["events", plan.footprint.events], ["shadowEvents", plan.footprint.shadowEvents]]) {
     if (!f.exists || !f.lines.length) continue;
     if (mode === "purge") done.removed[k] = dropLines(f.file, f.lines);
-    else done.removed[k] = 0;                   // kept; tombstones appended below
+    else done.removed[k] = 0;                   // 留着；下面追加撤销标记
   }
 
-  // 4. queue / turns / bindings / undelivered
+  // —— 4. 队列 / 轮次 / 绑定 / 欠账 ——
   const ob = plan.footprint.outbox;
   if (ob.exists && ob.keys.length) {
     const doc = readJson(ob.file, null);
@@ -531,12 +525,12 @@ function applyUndo({ plan, mode = "undo", now = () => new Date() }) {
   const un = plan.footprint.undelivered;
   if (un.exists && un.lines.length) done.removed.undelivered = dropLines(un.file, un.lines);
 
-  // 5. derived attachments
+  // —— 5. 派生附件 ——
   let voiceGone = 0;
-  for (const p of plan.footprint.voice) { try { fs.rmSync(p, { force: true }); voiceGone += 1; } catch { /* ignore */ } }
+  for (const p of plan.footprint.voice) { try { fs.rmSync(p, { force: true }); voiceGone += 1; } catch { /* 删不掉就算了 */ } }
   if (voiceGone) done.removed.voice = voiceGone;
 
-  // 6. Body-less tombstones: cursors don't rewind; tombstones keep old messages out
+  // —— 6. 撤销标记：**不含正文**。游标不倒退，靠它挡住旧消息重新进来 ——
   const tomb = path.join(gateRoot, "tombstones.jsonl");
   const at = now().toISOString();
   const marks = plan.turns.map((t) => JSON.stringify({
@@ -546,30 +540,30 @@ function applyUndo({ plan, mode = "undo", now = () => new Date() }) {
   fs.appendFileSync(tomb, marks + "\n", { mode: 0o600 });
   done.tombstones = plan.turns.length;
 
-  // Body-less audit record
+  // 审计（无正文），普通撤销那档也靠它在账本里留痕
   const audit = path.join(gateRoot, "events.jsonl");
   try {
     fs.appendFileSync(audit, JSON.stringify({
       kind: "turn.undone", at, mode, eventIds: plan.ids,
       counts: plan.counts, backup: done.backup || null,
     }) + "\n", { mode: 0o600 });
-  } catch { /* ledger missing: ignore */ }
+  } catch { /* 账本没了就算了 */ }
 
   return { ok: true, mode, ...done };
 }
 
 /**
- * Verify: rescan after applying and report leftovers. Must run before intake
- * resumes (disk, memory and queues must be consistent).
+ * 验收：动完之后再扫一遍，看还有没有残留。
+ * **这一步必须跑** —— 她的规格最后一句就是「检查磁盘、内存、记忆和队列一致，再恢复接收」。
  */
 function verifyUndo(plan, { mode = "undo" } = {}) {
   const after = planUndo({
     gateRoot: plan.gateRoot, workspaceRoot: plan.workspaceRoot, threadId: plan.threadId,
     target: { kind: "event", eventId: plan.ids[0] },
   });
-  // The inbound event is gone (purge) or kept (undo); both are fine — check everything else
+  // 账本里那条入站被清了（purge）或还在（undo），两种都算正常 —— 看的是**别的地方**有没有残留
   const left = after.ok ? { ...after.counts } : {};
-  if (mode !== "purge") left.events = 0;              // undo keeps the ledger by design
+  if (mode !== "purge") left.events = 0;              // 普通撤销本来就留着账本
   const leftovers = Object.entries(left).filter(([, v]) => v > 0).map(([k, v]) => `${k}:${v}`);
   return { clean: leftovers.length === 0, leftovers };
 }

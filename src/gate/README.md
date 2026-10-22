@@ -1,99 +1,103 @@
-# Gate: two checkpoints + one shared capability layer
+# 共用桥（gate）：两道闸 + 一层共用能力
 
-The gate is assembled by `src/host/main.js` (process `im-gate`). The box (agent
-session) runs in a separate process (`im-box`); the gate connects to it over
-`box.sock` (`src/host/box-remote.js`), so restarting the gate does not
-interrupt the agent. Full specification: [`docs/SPEC.md`](docs/SPEC.md).
+依据 [设计稿 v1.5](/root/mille/ops-notes/socket-design-2026-09-16/design-v1.md) 的 0 节五条原则。
+**2026-09-20 05:54 起这就是生产**：`nova-gate`（`src/host/main.js`）装配本目录，盒子在 `nova-box` 里、
+桥连 `box.sock` 过去（`src/host/box-remote.js`）。重启桥不打断他。
+
+> 这份 README 是**现况图**。2026-09-17 晚它落后过一轮（还写着「阶段 1、12 个模块、
+> 一个 iMessage 插头」，而目录早就是 19 模块 + 4 插头 + 媒体层），
+> 按旧图接线的人会去补一个不存在的洞。**改了代码顺手改这里。**
 
 ```
-platform ──plugin──→ [processing] ─────────────→ [inbound] ──→ CLI (agent)
-         fetch/decrypt/    store·transcribe·vision    verify·identify·number·cold log
-         decompress/bytes  (shared layer, one copy)
+平台 ──插头──→ 【加工】────────────────→ 【入闸】 ──→ CLI（Nova）
+      收取/解密/解压/取字节    落仓·转写·识图·声学      验收/身份归一/编号/写冷层
+                              （共用层，每样只有一份）
 
-CLI ──→ [outbound] ──plugin──→ platform
-        check·ledger·resolve target    format·segment·upload
+CLI ──→ 【出闸】 ──插头──→ 平台
+        核对/登记/解析目标      排版·分段·上传
 ```
 
-Two boundaries:
+两条边界，违反哪条都算走回头路：
 
-- **The gate does not decode.** Platform-specific decryption/decoding belongs to
-  the plugin; the gate only checks that the result looks like human text.
-- **Processing lives outside the checkpoints.** Plugins only obtain bytes from
-  their platform; storing, transcription and vision are shared, so adding a
-  new platform does not duplicate them.
+- **闸不解码。** 平台特有的解密/解码归插头，闸只验收「这像不像人话」。
+- **加工在闸外。** 插头只负责「从这个平台拿到字节」，拿到之后（落仓/转写/识图/声学）
+  全归共用层 —— 接 QQ、接前端，这些一行都不用再写。
 
-## Files
+## 目录
 
-| File | Responsibility |
+| 文件 | 职责 |
 |---|---|
-| **Checkpoints** | |
-| `verify.js` | Acceptance: does not decode, but recognises text that is not human-readable |
-| `inbound.js` | Inbound: identity normalisation / numbering / cold log; unknown identities are not delivered |
-| `outbound.js` | Outbound: target resolved by the gate; silence is the agent's choice; foreign artifacts and quotes are annotated, not blocked |
-| `store.js` | Event ledger. Seq assigned at delivery, one sequence across plugins, persists across restarts |
-| `cold-writer.js` | The only cold-log writer; plugins cannot reach it |
-| `turn-binding.js` | Persists the current turn's origin (tools run in a separate process) |
-| `killswitch.js` | File-based switch; unreadable = disabled; no restart needed |
-| **Capabilities** | |
-| `capabilities.js` | Capability registry + outbound precheck (ask before expensive generation) |
-| `surface.js` | Three-layer capability surface: shared / per-plugin / plugin-specific |
-| (adapter) | `src/host/gate-capabilities.js` wires concrete services; not part of the gate |
-| **Shared processing** | |
-| `media-pipeline.js` | `hydrate` = fetch bytes → store → process by type → text |
-| `file-store.js` | Content-addressed file store; type sniffed from magic bytes |
-| `stickers.js`, `sticker-book.js` | Cross-platform sticker catalogue |
-| `segment.js` | Splitting long replies into bubbles |
-| `group.js` | Group-chat wake rules and batching |
-| `routing.js` | Five-tier routing |
-| **Plugins** | |
+| **闸** | |
+| `verify.js` | 验收。**闸不解码，但认得出「这不像人话」** |
+| `inbound.js` | 入闸。身份归一 / 编号 / 写冷层；**未知身份不投递** |
+| `outbound.js` | 出闸。目标由闸解析；沉默权归他；异物与引用只标注不拦截 |
+| `store.js` | 事件账本。**编号在投递那一刻分配**，跨渠道一条序列、跨重启不清零 |
+| `cold-writer.js` | **唯一冷层写手**。插件在结构上够不着 |
+| `turn-binding.js` | 本轮来路落盘（工具是独立进程，只能靠盘上这份找回「这轮从哪来的」） |
+| `killswitch.js` | 文件开关。**读不到一律走老路**，删掉即回滚，不用重启 |
+| **能力面** | |
+| `capabilities.js` | 第 1 层注册表 + 出站 precheck（**昂贵生成之前先问能不能交付**） |
+| `surface.js` | 三层能力面：共用 / 每插头表态 / 插头专属。第 3 层给不了必须明说 |
+| （适配器不在这儿） | 「在这台机器上凑齐那些服务」的胶水是 `src/host/gate-capabilities.js`，**不属于桥** |
+| **共用加工** | |
+| `media-pipeline.js` | 媒体流水线。`hydrate` = 取字节 → 落仓 → 按类型加工 → 出人话 |
+| `file-store.js` | 文件仓。按内容哈希去重、**类型从 magic 嗅**、存在性可查（幽灵检测） |
+| `stickers.js` | 贴纸库（跨渠道，不属于任何一个平台） |
+| **插头** | |
+| `plugins/wechat/` | **她自己的真实微信**（a11y 直读库）。渠道名 `wechat`。SQLCipher / zstd / appmsg / 图片 AES+wxgf / 语音 SILK。微信私有解码全在里面：`index.js`（采集+交付）·`appmsg.js`（卡片/引用 XML）·`media.js`（图片 AES+wxgf、语音 SILK）·`media-config.js`（密钥与路径）+ 几个 py 脚本。**闸的根目录不认识微信** |
+| `plugins/weixin-bot.js` | **im.bot 上的一个 bot 账号**，渠道名 `wechat-bot`（备胎，带病留着）。⚠️ 2026-09-18 Alice拆开：它跟上面那条**不是一个插口** —— 身份（wxid vs fromUserId）、回话方式（要 contextToken）、消息处理全不一样，「都是微信」不等于同一个来源 |
 | `plugins/telegram.js` | Telegram Bot API |
-| `plugins/wechat/` | Desktop WeChat on Linux: reads the local encrypted database and sends via accessibility automation. All WeChat-specific decoding lives here. See the warning in the top-level README. |
-| `plugins/weixin-bot.js` | A WeChat bot-gateway account (channel `wechat-bot`); separate identity and reply model from `wechat` |
-| `plugins/imessage.js` | iMessage (push-based, persisted to disk, then polled) |
-| `plugins/phone.js` | Voice-call leg |
-| **Assembly** | |
-| `wire.js` | `buildGate()` + `makeIntake()` (single inbound entry) + `preflight()` |
-| `pipeline.js` | Main loop: inbound → envelope → box → routing → outbound |
-| `tools/` | Delivery tools exposed to the agent over MCP (see `tools/README.md`) |
-| `tool-socket.js` | Socket the MCP tool server talks to |
-| `shadow.js` | Shadow run: feeds real traffic through the checkpoints without sending or injecting |
+| `plugins/imessage.js` | iMessage |
+| **装配 / 验证** | |
+| `wire.js` | `buildGate()` 装配 + **`makeIntake()` 入站唯一入口** + `preflight()` |
+| `tools/` | 投递工具（`reply` / `send_image` / `send_file` / `send_voice` / `send_sticker` / `react` / `call` / `hang_up` + `mcp-server.js`）：旧名字全留，渠道语义剥掉，工具名只决定意图 |
+| `shadow.js` | 影子跑。只读真实流量喂闸，**不发送、不注入、不碰Nova** |
 
-## Single inbound entry
+## 入站唯一入口
 
-Collectors (live listener or shadow) only fetch raw records; the rest happens in `intake`:
+采集器（生产 listener / 影子）只管「从平台捞到一条原始记录」，剩下三步都在 `intake` 里：
 
 ```js
-gate.intake({ channel: "wechat", raw: row, extraMedia: [] })
-//  plugin.toDelivery(raw)      plugin decrypts/decodes → delivery (media by reference)
-//  media.hydrate(delivery)     fetchMedia gets bytes → ingest stores/transcribes/describes
-//  inbound.accept(delivery)    verify / identify / number / cold log
+gate.intake({ channel: "wechat", raw: 那一行, extraMedia: [] })
+//  plugin.toDelivery(raw)      插头解密解压 → 交付（媒体只带定位）
+//  media.hydrate(delivery)     fetchMedia 取字节 → ingest 落仓/转写/识图/声学
+//  inbound.accept(delivery)    验收 / 身份归一 / 编号 / 写冷层
 ```
 
-Both the shadow and production use this function, so what the shadow validates
-is exactly what production delivers.
+**为什么非得收成一个口子**：9-17 之前这三步散在各处，媒体那一段谁都没接 ——
+`media.ingest` 和 `fetchMedia` 全仓只有测试在调，图片解密解得再对，投到他眼前
+仍然是一个 `[图片]`，流水线整条空转。而影子和生产各走各的路，影子验过的不代表生产走的。
+现在**两边都走这个函数**，影子验的就是真交付。
 
-## Tests
+## 跑测试
 
 ```bash
-npm test                 # runtime + gate + cli-host
-bash test/run-gate.sh    # gate only
+npm test          # runtime + gate + cli-host 三组；只跑桥：bash test/run-gate.sh
 ```
 
-Notable ones:
+其中这几个值得单独知道：
 
-- `intake.js` — the single inbound entry (missing bytes must be reported; file paths must not be lost)
-- `wechat-media.js` — WeChat media decoding; tests needing real data skip when keys are absent
-- `shadow-direction.js` — database rows have no direction; the sender must be determined
+- `intake.js` —— 入站唯一入口那一针（取不到字节要明说、文件路径不许弄丢）
+- `wechat-media.js` —— 测的是 `plugins/wechat/media.js`，**会拿真微信数据跑**（密钥读不到就自动跳过）
+- `shadow-direction.js` —— 读库没有方向，得自己判发送者（影子第一夜 812 条里 620 条是他自己的）
 
-## Design notes embedded in the code
+## 教训直接长在代码里
 
-- `verify.js`: newlines are not bad characters.
-- `inbound.js`: unknown identities are rejected by default, not by remembering an allow-list.
-- `inbound.js` / `media-pipeline.js`: if processing produced text, use it; otherwise fall back to a label — never an empty body.
-- `cold-writer.js`: images are stored as `[image]` labels (paths would pull old
-  images back into context); voice is stored as its transcript.
-- `shadow.js`: transcription is off by default in shadow mode; enable with `GATE_SHADOW_TRANSCRIBE=1`.
+- `verify.js`：**换行不是坏字符**。9-17 抄判据时漏了半句，19729 条正常消息被判成乱码（真实 4 条）。
+- `inbound.js`：**未知身份拒绝投递**。不靠「记得配白名单」，靠闸不认识的人根本不放行。
+- `inbound.js` / `media-pipeline.js`：**加工层给的话，闸就用；加工层没给，退回标签，绝不空白。**
+  空白比明说危险 —— 他会自己脑补。
+- `cold-writer.js`：**图片只存 `[图片]`，语音存转写的字**。前者是因为存路径会把旧图带回
+  活动上下文（§0.4）；后者是因为转写没有路径，它就是她说的话，只存 `[voice]` 等于一换舱就失忆。
+- `shadow.js`：影子的转写**默认不开**。只读观察不能因为她发了条语音就自动烧 whisper 的钱，
+  要验就显式开 `GATE_SHADOW_TRANSCRIBE=1`。
 
-## Not implemented
+## 还没做的
 
-Receiving video on the WeChat plugin.
+微信收视频（插头没去取文件，抽帧要多帧）。
+**接口被真实流量验证之前不往上加东西。**
+
+> **已还的债**：`appmsg.js` / 微信媒体解码搬进 `plugins/wechat/` —— 2026-09-18 凌晨的地基整改
+> 就做完了（见 `docs/SPEC.md` 第 5 条），这份 README 到 9-21 才跟上。
+> 闸的根目录现在没有任何 `appmsg` / `wechat-media` 文件，全仓 `require` 也都指着
+> `src/gate/plugins/wechat/{appmsg,media,media-config,index}`。

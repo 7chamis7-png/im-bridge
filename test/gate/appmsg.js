@@ -1,7 +1,7 @@
 "use strict";
 /**
- * WeChat appmsg parsing: link cards, files, quoted replies, card rendering rules.
- * Samples mirror the structure of real WeChat appmsg XML (content is synthetic).
+ * appmsg 解析（Nova清单第 4、5 条）。
+ * 样本用的是 2026-09-17 她真发过来的那几条的形状，不是我编的。
  */
 const { parseAppmsg, renderAppmsg, unescapeXml } = require("../../src/gate/plugins/wechat/appmsg");
 const { WeChatPlugin } = require("../../src/gate/plugins/wechat");
@@ -13,30 +13,30 @@ const check = (n, g, w) => {
   ok ? pass++ : fail++;
 };
 
-// a shared link card (subtype 5)
+// 她 15:37 真发的那张小红书卡片（local_id=927，子类型 5），XML 结构原样
 const XHS = `<?xml version="1.0"?>
 <msg>
  <appmsg appid="wxd8a2750ce9d46980" sdkver="0">
-  <title>十个旅行小技巧（第 2 版）</title>
-  <des>@example_user 的笔记
-123人分享</des>
+  <title>西班牙所有厕所密码（25.9 版）</title>
+  <des>@ZOE去旅行 的笔记
+260人分享</des>
   <type>5</type>
-  <url>https://example.com/item/6aa9?a=1&amp;b=2</url>
+  <url>https://www.xiaohongshu.com/discovery/item/6aa9?a=1&amp;b=2</url>
   <appattach><cdnthumburl>305f0201</cdnthumburl></appattach>
  </appmsg>
 </msg>`;
 
 console.log("\n[1] 链接卡片：标题 + 说明 + 能点的网址");
 const a = parseAppmsg(XHS);
-check("标题", a.title, "十个旅行小技巧（第 2 版）");
+check("标题", a.title, "西班牙所有厕所密码（25.9 版）");
 check("子类型 5", a.type, 5);
-check("网址里的 &amp; 解回 &", a.url, "https://example.com/item/6aa9?a=1&b=2");
-check("说明两行都在", a.des.includes("example_user") && a.des.includes("123人分享"), true);
+check("网址里的 &amp; 解回 &", a.url, "https://www.xiaohongshu.com/discovery/item/6aa9?a=1&b=2");
+check("说明两行都在", a.des.includes("ZOE去旅行") && a.des.includes("260人分享"), true);
 
-console.log("\n[2] agent 收到的是一行，不是一坨 XML");
+console.log("\n[2] 投给他的是一行，不是一坨 XML");
 const line = renderAppmsg("link", a);
 check("带【链接】抬头", line.startsWith("【链接】"), true);
-check("网址在里面", line.includes("example.com"), true);
+check("网址在里面", line.includes("xiaohongshu.com"), true);
 check("比原 XML 短得多", line.length < XHS.length, true);
 check("没有尖括号标签漏出来", /<\/?(msg|appmsg|title)>/.test(line), false);
 
@@ -47,20 +47,22 @@ check("文件名", f.fileName, "读后感.txt");
 check("大小", f.fileSize, 85196);
 check("渲染带 KB", renderAppmsg("file", f).split("\n")[0], "【文件】读后感.txt (83KB)");
 check("没路径时明说本地没找到", /本地没找到/.test(renderAppmsg("file", f)), true);
-// The file is stored unencrypted on disk; the rendered line must include its path.
+// 2026-09-17 12:02 的真事：她发来 2726 行图纸，生产只给了他 1577 字 XML，
+// 他据此判断「微信附件走 CDN 加密 芯没落地」—— 判断错了，文件明文躺在盘上。
+// **能读却不知道能读，比读不到更糟。** 所以路径必须在那一行里。
 check("有路径时必须写出来", renderAppmsg("file", { ...f, localPath: "/x/y.txt" }).includes("/x/y.txt"), true);
-check("并且说明可以直接读", /直接读/.test(renderAppmsg("file", { ...f, localPath: "/x/y.txt" })), true);
+check("并且告诉他可以直接读", /直接读/.test(renderAppmsg("file", { ...f, localPath: "/x/y.txt" })), true);
 
-console.log("\n[4] 引用回复：知道引用的是哪一条");
-const Q = `<msg><appmsg><title>明天下午三点</title><type>57</type>
- <refermsg><displayname>Alice</displayname><content>会议几点开始</content></refermsg>
+console.log("\n[4] 引用回复：他要知道「罪名对应哪桩」");
+const Q = `<msg><appmsg><title>那你哪来的轨</title><type>57</type>
+ <refermsg><displayname>Alice</displayname><content>你结婚了吗</content></refermsg>
 </appmsg></msg>`;
 const q = parseAppmsg(Q);
-check("抽出被引的那句", q.quote.text, "会议几点开始");
+check("抽出被引的那句", q.quote.text, "你结婚了吗");
 check("抽出是谁说的", q.quote.from, "Alice");
 const qline = renderAppmsg("quote", q);
-check("先说引的哪句", qline.startsWith("【引用】Alice：会议几点开始"), true);
-check("再说回的是什么", qline.includes("明天下午三点"), true);
+check("先说引的哪句", qline.startsWith("【引用】Alice：你结婚了吗"), true);
+check("再说他回的什么", qline.includes("那你哪来的轨"), true);
 
 console.log("\n[5] 转义：&amp; 最后解，别把 &amp;lt; 解成 <");
 check("&amp;lt; 应还原成字面 &lt;", unescapeXml("a&amp;lt;b"), "a&lt;b");
@@ -71,8 +73,8 @@ const p = new WeChatPlugin({});
 const d = p.toDelivery({ table: "Msg_x", local_id: 1, local_type: 5 * 4294967296 + 49,
   create_time: 1758094679, raw: Buffer.from(XHS, "utf8"), sender: "wxid_x" });
 check("认成 link", d.media[0].kind, "link");
-check("ref 放网址（下游能直接用）", d.media[0].ref.includes("example.com"), true);
-check("解析结果也带着", d.media[0].card.title, "十个旅行小技巧（第 2 版）");
+check("ref 放网址（下游能直接用）", d.media[0].ref.includes("xiaohongshu"), true);
+check("解析结果也带着", d.media[0].card.title, "西班牙所有厕所密码（25.9 版）");
 check("正文是渲染后的行", d.text.startsWith("【链接】"), true);
 const t = p.toDelivery({ table: "Msg_x", local_id: 2, local_type: 1,
   create_time: 1758094679, raw: Buffer.from("吃了吗", "utf8"), sender: "wxid_x" });
@@ -103,7 +105,7 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
   const d2 = pp.toDelivery({ table: "Msg_x", local_id: 2, local_type: 6 * 4294967296 + 49,
     create_time: ts, raw: Buffer.from(F2, "utf8"), sender: "wxid_x" });
   check("找到明文路径", d2.media[0].localPath, pathMod.join(root, "2026-09", "读后感.txt"));
-  check("渲染出的那行里带着路径", d2.text.includes(pathMod.join(root, "2026-09", "读后感.txt")), true);
+  check("投给他的那行里带着路径", d2.text.includes(pathMod.join(root, "2026-09", "读后感.txt")), true);
 
   // 跨月：消息在 10 月初，文件落在 9 月目录
   const tsOct = Math.floor(Date.UTC(2026, 9, 1, 0, 30, 0) / 1000);
@@ -128,7 +130,7 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
   check("没给 filesRoot 就不找，不猜", d4.media[0].localPath, undefined);
 }
 
-// ============ card rendering rules: keep content / drop wrapper / label source / cap / plain text untouched ============
+// ============ 卡片翻译规则（Alice 2026-09-17 拍板：留内容/扔壳/标来路/封顶/纯文本不动）============
 {
   const { clip, stripCdata, renderAppmsg, APPMSG_MAX } = require("../../src/gate/plugins/wechat/appmsg");
 
@@ -147,10 +149,10 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
   const tp = new WeChatPlugin({});
   const td = tp.toDelivery({ table: "Msg_x", local_id: 90, local_type: 2000 * 4294967296 + 49,
     create_time: 1758000000, raw: Buffer.from(transfer, "utf8"), sender: "wxid_x" });
-  check("渲染结果没有 CDATA 壳", td.text.includes("CDATA"), false);
+  check("投给他的没有 CDATA 壳", td.text.includes("CDATA"), false);
   check("钱的事叫钱的名字，不叫【卡片】", td.text.startsWith("【转账】微信转账"), true);
 
-  console.log("\n[标来路] 每张卡片都标明来路（不是发送者亲口说的）");
+  console.log("\n[标来路] 每张卡片都得让他看出「这不是她亲口说的」");
   for (const [sub, want] of [[19, "【聊天记录】"], [24, "【收藏】"], [2001, "【红包】"],
                              [51, "【视频号】"], [5, "【链接】"], [33, "【小程序】"]]) {
     const xml = `<msg><appmsg><title>t</title><type>${sub}</type></appmsg></msg>`;
@@ -159,8 +161,8 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
     check("子类型 " + sub + " -> " + want, d.text.startsWith(want), true);
   }
 
-  console.log("\n[封顶只截描述] 标题和网址一个字不动");
-  const url = "https://example.com/explore/abc123";
+  console.log("\n[封顶只截描述] 标题和网址一个字不动 —— 他要自己跑去读");
+  const url = "https://www.xiaohongshu.com/explore/abc123";
   const big = `<msg><appmsg><title>标题在这</title><des>${"描".repeat(900)}</des>`
     + `<url>${url}</url><type>5</type></appmsg></msg>`;
   const bd = tp.toDelivery({ table: "Msg_x", local_id: 95, local_type: 5 * 4294967296 + 49,
@@ -170,8 +172,8 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
   check("总长封在 600 上下", bd.text.length <= APPMSG_MAX + 40, true);
   check("说明描述被截了", bd.text.includes("已截断"), true);
 
-  console.log("\n[纯文本不动] 用户自己打的字一个都不许丢");
-  const plain = "报价单".repeat(3000);           // 9000 chars
+  console.log("\n[纯文本不动] 她自己打的字一个都不许丢");
+  const plain = "报价单".repeat(3000);           // 9000 字，真事：9-17 她转来 8546 字
   const pd = tp.toDelivery({ table: "Msg_x", local_id: 96, local_type: 1,
     create_time: 1758000000, raw: Buffer.from(plain, "utf8"), sender: "wxid_x" });
   check("一个字没丢", pd.text.length, plain.length);
@@ -183,6 +185,67 @@ console.log("\n[8] 文件的本地路径：微信收到的文件是明文落盘�
     create_time: 1758000000, raw: Buffer.from(weird, "utf8"), sender: "wxid_x" });
   check("封顶了", wd.text.length < 2100, true);
   check("说了是哪个类型、原文多长", wd.text.includes("原文共 5000 字，已截断"), true);
+}
+
+// ============ 真数据回归：2026-09-17 那四条真卡片 ============
+// ⚠️ **卡片原文不进仓库** —— 里面是她和别人的私事（聊天记录那条尤其）。
+// 照 wechat-media.js 的老规矩：读真库，读不到就跳过。
+{
+  console.log("\n[真卡片] 2026-09-17 四条（读不到真库就跳过）");
+  const { execFileSync } = require("child_process");
+  const fsMod = require("fs");
+  const pMod = require("path");
+  const { APPMSG_MAX } = require("../../src/gate/plugins/wechat/appmsg");
+  let rows = null;
+  // ⚠️ 只有「真库读不到」才算跳过。代码写错了必须炸出来 ——
+  // 第一版这个 try 把我自己的 `fs is not defined` 吞成了「跳过真数据」，
+  // 测试一片绿而那一段根本没跑。**静默跳过比失败危险。**
+  let keys;
+  try {
+    if (process.env.IM_BRIDGE_REAL_WECHAT !== "1") throw new Error("未设 IM_BRIDGE_REAL_WECHAT=1（默认不碰真实微信库/密钥）");
+    keys = JSON.parse(fsMod.readFileSync("/root/wxkey/all_keys.json", "utf8"));
+    if (!keys._db_dir) throw new Error("没有 _db_dir");
+  } catch (e) {
+    console.log("SKIP: appmsg 真数据段（" + String(e.message).slice(0, 80) + "）");
+    keys = null;
+  }
+  if (keys) {
+    const data = keys;
+    const db = pMod.join(data._db_dir, "message/message_0.db");
+    const key = (data["message/message_0.db"] || {}).enc_key;
+    const sqlc = (sql) => execFileSync("sqlcipher", ["-batch", db], {
+      input: `PRAGMA key = "x'${key}'";\nPRAGMA cipher_compatibility = 4;\n.headers off\n.mode list\n.separator |\n${sql}\n`,
+      encoding: "utf8", maxBuffer: 256 * 1024 * 1024,
+    }).split("\n").filter((l) => l && l !== "ok");
+    const T0 = Math.floor(Date.parse("2026-09-17T00:00:00Z") / 1000);
+    rows = [];
+    for (const t of sqlc("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%';")) {
+      if (!/^Msg_[0-9a-f]{32}$/.test(t)) continue;
+      for (const line of sqlc("SELECT local_id, local_type, create_time, hex(ifnull(message_content,'')) FROM "
+          + t + " WHERE create_time >= " + T0 + " AND local_type % 4294967296 = 49;")) {
+        const p = line.split("|");
+        if (p.length >= 4) rows.push({ t, id: Number(p[0]), lt: Number(p[1]), ct: Number(p[2]), hex: p[3] });
+      }
+    }
+    if (!rows.length) console.log("  真库里今天没有 appmsg 卡片，这一段没跑");
+  }
+
+  if (rows && rows.length) {
+    const tp2 = new WeChatPlugin({});
+    let worst = 0, leaked = 0, unlabeled = 0;
+    for (const r of rows) {
+      const raw = Buffer.from(r.hex, "hex");
+      const d = tp2.toDelivery({ table: r.t, local_id: r.id, local_type: r.lt,
+        create_time: r.ct, raw, sender: "wxid_x" });
+      worst = Math.max(worst, (d.text || "").length);
+      if (/<\/(msg|appmsg)>|CDATA|<thumburl>/.test(d.text || "")) leaked += 1;
+      if (!/^【/.test(d.text || "")) unlabeled += 1;
+    }
+    check("今天所有 appmsg 卡片都带来路标签", unlabeled, 0);
+    check("没有一条把 XML 壳漏给他", leaked, 0);
+    check("最长的一条也在封顶以内（" + worst + " 字）", worst <= APPMSG_MAX + 60, true);
+    console.log("  （今天 " + rows.length + " 条真卡片，最长输出 " + worst + " 字）");
+  }
 }
 
 console.log(`\n通过 ${pass} / 失败 ${fail}`);

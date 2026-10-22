@@ -1,7 +1,7 @@
 "use strict";
 /**
- * Capability surface: shared / declared by every plugin / plugin-specific.
- * Key check: plugin-specific extras on channels without them are reported, never dropped.
+ * 能力面三层：共用的 / 每个插头都要表态的 / 只有某个插头才有的。
+ * 重点验一条：**插头专属的东西在给不了的渠道上，必须明说，不许静默丢。**
  */
 const fs = require("fs");
 const os = require("os");
@@ -38,7 +38,7 @@ for (const p of [new TelegramPlugin({}), new WeChatPlugin({})]) {
   const d = describePlugin(p);
   check(`${d.channel} 没有漏表态的通用意图`, d.undeclared, []);
 }
-// start_call: adding an intent requires every plugin to declare it; this rule is tested too
+// 2026-09-18 加了 start_call（打电话）——加意图就得所有插头表态，这条规矩本身也在测
   check("通用意图现在 8 个", COMMON_INTENTS.length, 8);
 check("TG 有专属花样", describePlugin(new TelegramPlugin({})).extras.length > 0, true);
 check("微信一个专属花样都没有", describePlugin(new WeChatPlugin({})).extras, []);
@@ -52,9 +52,10 @@ let dup = "";
 try { caps.register("synthesize_voice", async () => ({})); } catch (e) { dup = e.message; }
 check("同名第二份实现直接报错（只有一份是硬要求）", /不允许第二份/.test(dup), true);
 
-// Unsupported plugin-specific args are covered by the outlet tests (test/gate/outlet.js):
-// text is still sent, extras never leak to channels that don't know them, and the
-// result states explicitly that they did not go out.
+// ⚠️ 2026-09-18：原 [4][5] 两段（插头专属参数在给不了的渠道上必须明说、并进冷层）
+// 依赖已删掉的「工具收编表」——那张表把工具名写死在闸里，违反铁律 2。
+// **能力本身没作废**，它属于投递口（见 docs/SPEC.md §8）：重写投递口时按这两段的
+// 断言补回来——正文照发、专属参数不混进不认识它的渠道、返回里明说没出去、冷层留痕。
 (async () => {
   console.log(`\n通过 ${pass} / 失败 ${fail}   (隔离目录 ${root})`);
   process.exit(fail ? 1 : 0);

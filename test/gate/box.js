@@ -1,14 +1,16 @@
 "use strict";
 /**
- * The five box methods: the contract itself — all methods present, empty turns
- * rejected, silence reported downstream. Real boxes live outside the bridge.
+ * 盒子五条口（2026-09-18）
+ *
+ * 测的是**契约本身**：五条口齐不齐、空轮进不进得去、他不说话时下游知不知道。
+ * 真盒子（claude / codex）住在桥外面，那份由宿主自己验。
  */
 const { BOX_CONTRACT, assertBox, assertTurnIn, makeFakeBox } = require("../../src/gate/box");
 const { makeEnvelope } = require("../../src/gate/envelope");
 
-/** a minimal real envelope */
+/** 一个最小的真信封（盒子吃的就是它） */
 const env = (trace_id, text, extra = {}) => makeEnvelope({
-  trace_id, source: { kind: "user", platform: "telegram", chat_id: "10001", sender_id: "10001" },
+  trace_id, source: { kind: "user", platform: "telegram", chat_id: "861", sender_id: "861" },
   payload: { text }, ...extra,
 });
 
@@ -23,23 +25,23 @@ const throws = (n, fn, re) => {
   catch (e) { check(n, re.test(e.message), true); }
 };
 
-console.log("[1] wiring check: missing methods fail at wiring time");
+console.log("[1] 装配体检：缺口子要在接线那一刻就说，不许等她说话时才炸");
 check("五条口", Object.keys(BOX_CONTRACT).length, 5);
-throws("no box", () => assertBox(null), /no box given/);
-throws("no methods", () => assertBox({}), /deliver/);
+throws("盒子没给", () => assertBox(null), /盒子没给/);
+throws("一条口都没有", () => assertBox({}), /deliver|送一轮/);
 const half = { deliver: () => {}, onReply: () => {}, fullness: () => {} };
 try { assertBox(half); check("缺两条要抛", "没抛", "该抛"); }
 catch (e) {
   check("点名缺的那两条", /onTurnDone/.test(e.message) && /rotate/.test(e.message), true);
-  check("does not list present ones", /deliver \(/.test(e.message), false);
+  check("不冤枉已经有的", /deliver（/.test(e.message), false);
   pass += 0;
 }
 check("齐了就放行", assertBox(makeFakeBox()) !== null, true);
 
 console.log("\n[2] 进盒子的那一轮：一定错的两种当场挡下");
-throws("没有 trace_id", () => assertTurnIn({ role: "user", source: { kind: "user", sender_id: "10001" }, payload: { text: "在吗" } }), /trace_id/);
+throws("没有 trace_id", () => assertTurnIn({ role: "user", source: { kind: "user", sender_id: "861" }, payload: { text: "在吗" } }), /trace_id/);
 throws("空轮（既没正文也没媒体）", () => env("t1", "  "), /空轮/);
-check("只有媒体也算数", makeEnvelope({ trace_id: "t1", source: { kind: "user", sender_id: "10001" }, payload: { media: [{ kind: "image" }] } }).trace_id, "t1");
+check("只有媒体也算数", makeEnvelope({ trace_id: "t1", source: { kind: "user", sender_id: "861" }, payload: { media: [{ kind: "image" }] } }).trace_id, "t1");
 
 (async () => {
   console.log("\n[3] 一轮跑完：话拿得出来，轮结束说得清楚");
@@ -49,12 +51,12 @@ check("只有媒体也算数", makeEnvelope({ trace_id: "t1", source: { kind: "u
   box.onTurnDone((d) => dones.push(d));
   const r = await box.deliver(env("tr-1", "明天几点的火车"));
   check("拿到轮号和舱号", Boolean(r.turnId && r.threadId), true);
-  check("reply came out", replies.map((x) => x.text), ["七点二十 我叫你"]);
+  check("他的话出来了", replies.map((x) => x.text), ["七点二十 我叫你"]);
   check("话上带着 trace_id（一条 grep 看全程）", replies[0].trace_id, "tr-1");
   check("这一轮说完了", dones.length, 1);
   check("不是沉默", dones[0].silent, false);
 
-  console.log("\n[4] agent chooses silence — downstream must know");
+  console.log("\n[4] 他选择不说 —— 下游必须知道，不能干等");
   const quiet = makeFakeBox({ answer: () => null });
   const qReplies = [], qDones = [];
   quiet.onReply((x) => qReplies.push(x));

@@ -1,5 +1,5 @@
 "use strict";
-// Transcript trimming: dry-run estimate / apply with backup / intact chain / path rule
+// 裁工具链（2026-09-21 搬回）：干跑估收益 / 落刀备份 / 链不断 / 路径算法
 const assert = require("assert");
 const fs = require("fs"); const os = require("os"); const path = require("path");
 const T = require("../../src/box/trim-transcript");
@@ -18,9 +18,8 @@ for (let i = 0; i < 16; i++) {
 }
 fs.writeFileSync(file, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
 
-console.log("[1] path rule matches gate-box-claudecode");
-check("/srv/agent → -srv-agent", T.transcriptPath("/srv/agent", "abc", "/home/x") === "/home/x/.claude/projects/-srv-agent/abc.jsonl");
-check("dots become dashes", T.transcriptPath("/home/u/.x/ws", "abc", "/h") === "/h/.claude/projects/-home-u--x-ws/abc.jsonl");
+console.log("[1] 路径算法跟 gate-box-claudecode 一致");
+check("/root/nova → -root-nova", T.transcriptPath("/root/nova", "abc", "/home/x") === "/home/x/.claude/projects/-root-nova/abc.jsonl");
 
 console.log("[2] 干跑估收益");
 const est = T.estimateTrimGain({ file, currentTokens: 300_000 });

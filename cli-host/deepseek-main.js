@@ -1,95 +1,83 @@
 'use strict';
 
 /**
- * Standalone DeepSeek process for im-bridge (alternative to cli-host/main.js).
+ * 单独的 DeepSeek 进程（pm2: nova-deepseek，10-03 试过一次，现在不在跑）。
  *
- * State lives in DEEPSEEK_ROOT (default `$GATE_ROOT/deepseek`), including the
- * conversation file. By default it listens on its own socket so it can be
- * tried with `cli-host/deepseek-ask.js` without touching the box. To make it
- * the box's runtime, point DEEPSEEK_SOCKET at the socket the box connects to
- * (`$GATE_ROOT/cli.sock`) and stop the Claude im-cli; the box reconnects on
- * its own, no box code or restart needed.
+ * 2026-10-21 S5：Nova要用 DeepSeek 不用再起这个进程了 —— nova-cli 自己就能换到 openai-chat 插头（/engine）。
+ * 这个入口留着给「单独起一只 DeepSeek 接现成盒子」那种试验用，默认插头 openai-chat，也能换芯。
  *
- * The API key is read from the environment only (DEEPSEEK_API_KEY) and is
- * never written to this directory.
+ * 钥匙：**只从 /root/.secrets/<名字>.secret 读**（名字 = DEEPSEEK_SECRET，默认 deepseek）。
+ * 原来这里会去 nova-cli 进程的 environ 和 pm2 的存档文件里「借」钥匙 —— 删了：
+ * 钥匙放哪由Alice定（/root/.secrets），别的进程的环境不是钥匙柜。
  */
 
 const fs = require('node:fs');
-const os = require('node:os');
 const path = require('node:path');
 const { createCliHost } = require('./server');
-const { createDeepseekRuntime } = require('./deepseek-runtime');
+const { createEngineFactories, readSecret } = require('./engines');
+const { readPersonaSpec, personaConfigPath } = require('../src/host/persona-file');
 
-function envStr(name, fallback = '') {
-  const v = process.env[name];
-  return (typeof v === 'string' && v.trim()) ? v.trim() : fallback;
-}
+const { homePath, gateRoot } = require('../src/core/paths');
 
-const bridgeHome = envStr('IM_BRIDGE_HOME', path.join(os.homedir(), '.im-bridge'));
-const gateRoot = envStr('GATE_ROOT', path.join(bridgeHome, 'gate'));
-const root = envStr('DEEPSEEK_ROOT', path.join(gateRoot, 'deepseek'));
+const root = process.env.DEEPSEEK_ROOT || homePath('.nova-deepseek');
 const stateDir = path.join(root, 'state');
 fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
-try { fs.chmodSync(root, 0o700); } catch { /* Fine if it already exists with other perms. */ }
+try { fs.chmodSync(root, 0o700); } catch { /* 已经在也没关系 */ }
 
-if (!envStr('DEEPSEEK_API_KEY')) {
-  console.error('[im-deepseek] DEEPSEEK_API_KEY is not set.');
+// 起之前就验一下钥匙在不在（只验在不在，值不打印）
+try { readSecret(process.env.DEEPSEEK_SECRET || 'deepseek'); }
+catch (error) {
+  console.error(`[nova-deepseek] ${error.message}。不猜，也不从别的进程借。`);
   process.exit(1);
 }
 
-const workspace = envStr('DEEPSEEK_CWD', envStr('GATE_WORKSPACE_ROOT'));
-if (!workspace) { console.error('[im-deepseek] DEEPSEEK_CWD or GATE_WORKSPACE_ROOT is required.'); process.exit(1); }
-
-// Identity / system prompt, same file the Claude box uses unless overridden.
-const promptPath = envStr('DEEPSEEK_SYSTEM_PROMPT', envStr('GATE_IDENTITY_INJECTION_FILE', envStr('GATE_SYSTEM_PROMPT_FILE')));
+const promptPath = process.env.DEEPSEEK_SYSTEM_PROMPT || process.env.GATE_SYSTEM_PROMPT_FILE || homePath('nova', 'nova-system-prompt.md');
 let systemPrompt = '';
-if (promptPath) {
-  try { systemPrompt = fs.readFileSync(promptPath, 'utf8'); }
-  catch (error) { console.error('[im-deepseek] cannot read system prompt (' + promptPath + '):', error.message); }
-}
+try { systemPrompt = fs.readFileSync(promptPath, 'utf8'); }
+catch (error) { console.error('[nova-deepseek] 系统提示读不到：', error.message); }
 
-const coldFile = envStr('DEEPSEEK_COLD_FILE');
-const socketPath = envStr('DEEPSEEK_SOCKET', path.join(root, 'deepseek.sock'));
-const ingressPath = envStr('DEEPSEEK_INGRESS', path.join(stateDir, 'ingress.json'));
+const workspace = process.env.DEEPSEEK_CWD || process.env.GATE_WORKSPACE_ROOT || homePath('nova');
+const productionIngress = path.join(gateRoot(), 'state', 'im-bridge-ingress.json');
+
+const factories = createEngineFactories({ env: process.env, stateDir, workspace, requireCodexHome: true });
+const openai = factories['openai-chat'];
+factories['openai-chat'] = (cfg) => {
+  const given = cfg.sdkOptions || {};
+  return openai({ ...cfg, sdkOptions: { ...given, systemPrompt: given.systemPrompt || systemPrompt } });
+};
 
 const host = createCliHost({
-  socketPath,
-  ingressPath,
-  // No claude CLI is spawned; the path is a placeholder.
-  claudePath: '/usr/bin/true',
-  scope: envStr('DEEPSEEK_SCOPE', 'deepseek'),
+  // 人格文件由桥来交（见 src/host/persona-file.js）；deepseek-runtime 自己也会拼 cwd 里的 CLAUDE.md，
+  // 所以登记的引擎名是 deepseek（双份检查按它算）。
+  engine: 'deepseek',
+  personaSpec: () => readPersonaSpec(personaConfigPath()),
+  socketPath: process.env.DEEPSEEK_SOCKET || path.join(root, 'deepseek.sock'),
+  ingressPath: path.join(stateDir, 'ingress.json'),
+  claudePath: process.env.NOVA_CLI_PATH || '/usr/bin/claude',
+  scope: 'deepseek',
   fallbackEnsure: () => ({
     workspaceRoot: workspace,
-    ingressPath,
+    ingressPath: productionIngress,
     sdkOptions: { systemPrompt },
   }),
-  runtimeFactory(cfg) {
-    const given = cfg.sdkOptions || {};
-    return createDeepseekRuntime({
-      ...cfg,
-      cwd: cfg.cwd || workspace,
-      coldFile,
-      threadFile: path.join(stateDir, 'deepseek-thread.json'),
-      sdkOptions: { ...given, systemPrompt: given.systemPrompt || systemPrompt },
-    });
-  },
+  engines: factories,
 });
 
 let shuttingDown = false;
 async function bye(sig) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(`[im-deepseek] received ${sig}; stopping`);
+  console.log(`[nova-deepseek] 收到 ${sig}，正在停…`);
   try { await host.shutdown(); }
-  catch (error) { console.error('[im-deepseek] shutdown failed:', error.message); }
+  catch (error) { console.error('[nova-deepseek] 停的时候出错：', error.message); }
   process.exit(0);
 }
 process.on('SIGTERM', () => bye('SIGTERM'));
 process.on('SIGINT', () => bye('SIGINT'));
 process.on('unhandledRejection', (error) => {
-  console.error('[im-deepseek] unhandled rejection (process remains alive):', error && error.message ? error.message : error);
+  console.error('[nova-deepseek] 未处理的 rejection（继续跑）：', error && error.message ? error.message : error);
 });
 
 host.listen()
-  .then(() => console.log('[im-deepseek] listening on ' + socketPath + ' cwd=' + workspace))
-  .catch((error) => { console.error('[im-deepseek] startup failed:', error); process.exit(1); });
+  .then(() => console.log('[nova-deepseek] 起来了。听 ' + (process.env.DEEPSEEK_SOCKET || path.join(root, 'deepseek.sock'))))
+  .catch((error) => { console.error('[nova-deepseek] 起不来：', error); process.exit(1); });

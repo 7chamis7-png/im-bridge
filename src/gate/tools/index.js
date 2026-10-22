@@ -1,30 +1,29 @@
 "use strict";
 
 /**
- * Tool plugin loader.
+ * 工具插件加载器（2026-09-18）
  *
- * Scans this directory and loads each .js file as one tool. The bridge never
- * enumerates tool names: adding a tool means adding a file.
+ * 扫目录、把每个 .js 当一个工具收进来。**桥不枚举工具名**（铁律 2/3）：
+ * 加一个工具就是加一个文件，这里和核心都一行不用改。
  *
- * A broken plugin never takes down the whole set: if one file fails to load
- * it is skipped and reported, the rest load normally (load tolerance, not a
- * security boundary).
+ * 坏插件不许拖垮整包：单个文件 require 炸了就跳过它、大声说，其余照常加载。
+ * 这跟「白名单为空 = 一条都不放行」是两回事 —— 那是安全边界，这是加载容错。
  */
 
 const fs = require("fs");
 const path = require("path");
 
-/** A plugin must declare its name, description and either an intent or a handler. */
+/** 一个插件至少要说清楚：叫什么、干什么、怎么干（intent 或 handler 二选一）。 */
 function validate(mod, file) {
   const name = String((mod && mod.name) || "").trim();
   if (!name) return "没有 name";
   if (!/^[a-z][a-z0-9_]*$/.test(name)) return "name 只能是小写字母数字下划线：" + name;
-  if (!String((mod && mod.description) || "").trim()) return "没有 description（agent 无法判断何时使用）";
+  if (!String((mod && mod.description) || "").trim()) return "没有 description（他看不懂什么时候该用）";
   const hasIntent = Boolean(mod.intent);
   const hasHandler = typeof mod.handler === "function";
   if (!hasIntent && !hasHandler) return "既没有 intent 也没有 handler，不知道要干嘛";
   if (hasIntent && hasHandler) return "intent 和 handler 只能有一个：投递归出闸，别自己发";
-  // tool names are intents, not addresses: reject channel names like telegram_reply
+  // 工具名是意图不是地址 —— 挡住 telegram_reply 这类名字重新长出来
   for (const w of ["telegram", "wechat", "weixin", "imessage", "qq"]) {
     if (name.includes(w)) return "工具名里不许带渠道（" + w + "）—— 名字是意图，地址走 channel 参数";
   }
@@ -33,7 +32,7 @@ function validate(mod, file) {
 
 /**
  * @param {object} [o]
- * @param {string} [o.dir] plugin directory (defaults to this one)
+ * @param {string} [o.dir] 插件目录，默认就是本目录
  * @param {function} [o.log]
  * @returns {{byName: Map<string, object>, list: object[], errors: object[]}}
  */
@@ -42,7 +41,7 @@ function loadTools({ dir = __dirname, log = () => {} } = {}) {
   const errors = [];
   let files = [];
   try {
-    // index.js is the loader and mcp-server.js the MCP shell; neither is a tool
+    // index.js 是加载器本身，mcp-server.js 是那层壳 —— 都不是工具
     const NOT_PLUGINS = new Set(["index.js", "mcp-server.js"]);
     files = fs.readdirSync(dir)
       .filter((f) => f.endsWith(".js") && !NOT_PLUGINS.has(f))

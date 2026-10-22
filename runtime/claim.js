@@ -15,7 +15,7 @@ function nonempty(value) {
   return typeof value === 'string' && value.trim().length > 0;
 }
 
-/** State is owned and injected by the caller; registered Map entries are frozen and must not be mutated. */
+/** 状态由调用方持有并注入；调用方不能直接改写已登记的 Map 条目。 */
 function createClaim({ bindings, createUuid = randomUUID } = {}) {
   if (!(bindings instanceof Map)) throw new Error('轮次认领需要调用方提供绑定表 Map。');
 
@@ -26,8 +26,8 @@ function createClaim({ bindings, createUuid = randomUUID } = {}) {
     if (!nonempty(uuid) || (message.uuid != null && message.uuid !== uuid)) {
       throw new Error('轮次 UUID 为空或与消息自带的 UUID 不一致，不能建立归属。');
     }
-    // runtime-rules B-1/B-2: only accept a structured origin; threadId and recipient are fixed at enqueue time.
-    // Assumption: channel adapters use these three string fields.
+    // runtime-rules.md B-1/B-2：只收结构化来路，入队时固定 threadId 和收件人。
+    // 待确认假设：渠道适配层使用这三个字符串字段，见当日 worklog「等确认」。
     if (!origin || !['channel', 'threadId', 'recipient'].every((key) => nonempty(origin[key]))) {
       throw new Error('消息缺少渠道、threadId 或收件人，不能猜测回复该发给谁。');
     }
@@ -44,12 +44,12 @@ function createClaim({ bindings, createUuid = randomUUID } = {}) {
   }
 
   function lookup(event) {
-    // runtime-rules B-2: replies are matched by protocol UUID only - never by "current turn", body text or a previous hit.
+    // runtime-rules.md B-2：回包只查协议 UUID；不读当前轮、不读正文、不沿用上次命中。
     const ids = new Set([
       event?.user_message_uuid,
       ...(Array.isArray(event?.user_message_uuids) ? event.user_message_uuids : []),
     ]);
-    // Returns every binding; cross-channel merge / delivery policy is left to the assembly layer.
+    // 待确认假设：返回全部绑定，跨渠道合并/投递策略留给装配层，见 worklog。
     return [...ids].filter((id) => nonempty(id) && bindings.has(id)).map((id) => bindings.get(id));
   }
 

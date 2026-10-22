@@ -65,8 +65,9 @@ const check = (name, got, want) => {
 
   console.log("[1c] 在线判据 = 能不能发出去，不是「有没有塞替身」");
   {
-    // Production passes only a token (no sender). If health() only checked `sender`,
-    // every production leg would be offline and the outbound precheck would block.
+    // 2026-09-18 玩具实例实测抓到的真洞：生产装配按设计只给 token（不给 sender），
+    // health 却只认 sender → 一律 offline → 出闸 precheck 当场 blocked。
+    // 盒子跑完了、冷层也写了，她那头什么都没收到。测试里人人塞 sender，所以一路全绿。
     check("只给 token（生产就是这么装的）→ ready",
       new TelegramPlugin({ token: "test-token" }).health().availability, "ready");
     check("只给 sender（测试替身）→ ready",

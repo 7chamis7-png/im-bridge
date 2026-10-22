@@ -1,15 +1,16 @@
 "use strict";
 
 /**
- * Telegram plugin.
+ * Telegram 插件（阶段 3）
  *
- * Everything Telegram-specific lives in this file; adding it must not require
- * changes to the core in src/gate/.
+ * **这一个文件就是阶段 3 的全部。** 如果接它需要动 src/gate/ 里任何一个核心文件，
+ * 说明接口没定对，应当退回阶段 1 重定，而不是在核心里开特例。
+ * 这条就是 A01「新接一个渠道不修改 core」的判决方式。
  *
- *  - Messages are plain Bot API JSON (no decryption, unlike the WeChat leg)
- *  - Supports group chats
- *  - Voice must be downloaded before transcription; that processing belongs to
- *    the plugin side, not the core
+ * Telegram 与前两个渠道的差别，全部由插件自己消化：
+ *  - 正文是 Bot API 的明文 JSON，无需解密解压（对比微信要解 SQLCipher + zstd）
+ *  - 有群聊，而 iMessage / 微信这条线只有私聊
+ *  - 语音要先下载再转写 —— **转写属于加工，归插件（闸外）**
  */
 
 const fs = require("fs");
@@ -21,7 +22,7 @@ const DEFAULT_MEDIA_TIMEOUT_MS = 30_000;
 const DEFAULT_MEDIA_MAX_BYTES = 20 * 1024 * 1024;
 const TELEGRAM_MEDIA_KINDS = new Set(["image", "sticker", "voice", "audio", "video", "file"]);
 
-/** File to send: caller extras > tool args > capability output (TTS / image generation). */
+/** 要发的文件从哪来：调用方给的 > 工具参数 > 共用能力生成的（语音合成/生图）。 */
 function pickFile({ asset, extras, toolArgs }) {
   if (extras && extras.filePath) return String(extras.filePath);
   if (toolArgs && toolArgs.filePath) return String(toolArgs.filePath);
@@ -35,14 +36,14 @@ function pickFile({ asset, extras, toolArgs }) {
 class TelegramPlugin {
   /**
    * @param {object} opts
-   * @param {function} opts.sender     function that actually sends text via the Bot API
-   * @param {function} [opts.transcribe] optional voice transcriber (legacy hook)
-   * @param {function} [opts.call]     low-level Bot API call (method, params) => Promise<json.result>;
-   *   test seam. Without it a token is required and the plugin calls HTTPS itself.
-   * @param {string} [opts.token]      bot token; must be passed in, never read from a file path.
-   * @param {string|number} [opts.botId]      the bot's own user id (detects replies to the bot)
-   * @param {string} [opts.botUsername]       the bot's own @username (detects mentions)
-   *   Both only feed `addressing`; wake decisions belong to the shared layer (group.js).
+   * @param {function} opts.sender     真正打到 Bot API 的函数
+   * @param {function} [opts.transcribe] 语音转写，插件在交付前自己调（闸外加工）
+   * @param {function} [opts.call]     打 Bot API 的底层调用 (method, params) => Promise<json.result>
+   *   —— **测试塞替身用**。不给就得给 token，插头自己用 https 打。
+   * @param {string} [opts.token]      bot token。**只能传进来，不许从文件路径里读**（铁律 1）。
+   * @param {string|number} [opts.botId]      他自己的 user id —— 用来认「这条是不是在回他」
+   * @param {string} [opts.botUsername]       他自己的 @用户名 —— 用来认「这条有没有 @ 他」
+   *   这两样只喂给 `addressing`，**插头不拿它们做决定**：要不要叫醒是共用层（group.js）的事。
    */
   constructor({ sender, transcribe, call = null, token = "", stickerBook = null, stickerOwner = "",
     botId = "", botUsername = "", fetchBytes = null,
@@ -51,9 +52,9 @@ class TelegramPlugin {
     this.botId = String(botId || "");
     this.botUsername = String(botUsername || "").replace(/^@/, "").toLowerCase();
     this.sender = sender;
-    // Sticker book (optional). Without it only raw file_ids can be sent; failures are explicit.
+    // 贴纸本（路径装配时给）。没给就只能靠 file_id 发，发不了会明说。
     this.stickerBook = stickerBook;
-    // Which sticker pack owner to pick packs for
+    // 这条桥服务谁 —— 贴纸本按它挑包（Nova=小熊、Iris=小兔）
     this.stickerOwner = String(stickerOwner || "");
     this.token = String(token || "");
     this.call = call || ((method, params) => callBotApi(this.token, method, params));
@@ -63,7 +64,7 @@ class TelegramPlugin {
     this.fetchBytes = typeof fetchBytes === "function" ? fetchBytes : null;
     this.mediaTimeoutMs = Number(mediaTimeoutMs) > 0 ? Number(mediaTimeoutMs) : DEFAULT_MEDIA_TIMEOUT_MS;
     this.mediaMaxBytes = Number(mediaMaxBytes) > 0 ? Number(mediaMaxBytes) : DEFAULT_MEDIA_MAX_BYTES;
-    // Bot API supports nearly everything
+    // Bot API 能力最全
     this.capabilities = {
       send_text: "supported",
       send_file: "supported",
@@ -71,7 +72,7 @@ class TelegramPlugin {
       send_sticker: "supported",
       send_generated_image: "supported",
       react: "supported",
-      // The Bot API has no way to start a voice call
+      // Bot API 没有"发起语音通话"这回事（2026-09-18）
       start_call: "unsupported",
       end_call: "unsupported",
     };
@@ -79,8 +80,8 @@ class TelegramPlugin {
   }
 
   /**
-   * Bot API message -> standard delivery.
-   * @param {object} msg Telegram Bot API message object
+   * Bot API 的一条 message -> 标准交付。
+   * @param {object} msg Telegram Bot API message 对象
    */
   async toDelivery(msg) {
     const processing = [];
@@ -108,8 +109,8 @@ class TelegramPlugin {
       media.push({ kind: "audio", ref: String(msg.audio.file_id || ""),
         hintName: String(msg.audio.file_name || "") });
     }
-    // Round videos and GIFs are separate Bot API fields, not video/document.
-    // Missing them silently drops the media and leaves an empty text.
+    // 圆视频和 GIF 在 Bot API 里是独立字段，不会落进 video/document。
+    // 漏掉它们不会报错，只会把媒体静默丢掉、只剩一条空文本（2026-09-18 Keeper补）。
     if (msg && msg.video_note) {
       media.push({ kind: "video", ref: String(msg.video_note.file_id || ""),
         hintName: "video-note.mp4" });
@@ -145,14 +146,14 @@ class TelegramPlugin {
     const from = (msg && msg.from) || {};
     return {
       channel: this.channel,
-      // Platform facts for group handling (the decision itself lives in group.js):
-      // mentions the bot / replies to the bot / sender is a bot.
-      // Wake words are NOT evaluated here.
+      // 群那一套要的**平台事实**（动作归插头，决定归共用层 group.js）：
+      // 有没有 @ 他 / 这条是不是在回他 / 发言人是不是个 bot。
+      // 叫醒词（「Nova」「Alice」）**不在这儿判** —— 那是决定，不是平台脏活。
       addressing: this.#addressing(msg),
-      // Display name only; identity always uses the numeric id below.
+      // 群里他要看见是谁说的。昵称只用来显示，认人一律用上面那个数字 id。
       senderName: String(from.first_name || from.username || "").trim(),
       accountId: (msg && msg.botAccountId) || "telegram",
-      // Real platform identity: numeric user id, never the nickname (mutable, not unique)
+      // 真实平台身份 —— 用数字 user id，不用昵称（昵称可改、可重名）
       senderId: String(from.id || ""),
       chatId: String(chat.id || ""),
       chatType: chat.type === "private" ? "private" : "group",
@@ -192,7 +193,7 @@ class TelegramPlugin {
     }
     if (!this.token) return { bytes: null, failed: "token_missing" };
 
-    const url = "https://api.telegram.org/file/bot" + this.token + "/" + filePath;
+    const url = telegramApiBase() + "/file/bot" + this.token + "/" + filePath;
     try {
       const bytes = await this.#downloadBytes(url, filePath);
       if (!bytes || !bytes.length) return { bytes: null, failed: "empty_download" };
@@ -229,7 +230,7 @@ class TelegramPlugin {
     });
   }
 
-  /** Whether the message addresses the bot: @username (text or entities) or a reply to the bot. */
+  /** 这条消息有没有直接点他：@用户名（正文里或 entities 里）、或者回复他的消息。 */
   #addressing(msg) {
     const text = String((msg && (msg.text || msg.caption)) || "");
     const u = this.botUsername;
@@ -248,26 +249,28 @@ class TelegramPlugin {
   }
 
   /**
-   * Fetch messages from the platform.
+   * **自己去平台捞消息**（2026-09-18）。
    *
-   * The plugin only fetches. Persisting/advancing the cursor belongs to the shared
-   * layer (reliable redelivery, see SPEC §5): if the plugin advanced it itself, a
-   * crash would lose the in-flight messages.
+   * 插头只管「捞」，捞上来什么样交出去什么样 —— **游标存不存、什么时候推进，
+   * 不归它管**（那是共用层的可靠重投：进了盒子、落了冷层才算数，见 SPEC §5）。
+   * 插头自己推进游标的话，进程一崩，那几条就永远丢了。
    *
    * @param {object} o
-   * @param {number} [o.since]      update_id to start from (cursor from the shared layer)
-   * @param {number} [o.timeoutSec] long-poll timeout; 0 = return immediately
+   * @param {number} [o.since]      从哪个 update_id 开始（共用层给的游标）
+   * @param {number} [o.timeoutSec] 长轮询等多久；0 = 不等，立刻回
    * @param {number} [o.limit]
    * @returns {{items: Array<{update_id:number, message:object}>, cursor:number}}
-   *   cursor = where to start next time; the shared layer stores it once the batch is processed.
+   *   cursor = **下一次该从哪开始**；共用层确认这批都消化完了才存它。
    */
   async poll({ since = 0, timeoutSec = 25, limit = 100 } = {}) {
     const updates = await this.call("getUpdates", {
       offset: since || undefined,
       timeout: timeoutSec,
       limit,
-      // Only message types this leg handles. callback_query = inline button presses;
-      // without it buttons spin forever and the agent never learns about the press.
+      // 只要真人消息那几类；别的类型（编辑、频道帖、投票）这条腿不认，
+      // 收进来也没人处理，白占游标。
+      // 2026-09-20：加 callback_query —— 她按了他发的选项按钮。不收的话按钮能发、
+      // 一按就一直转圈，他那头什么也不知道。
       allowed_updates: ["message", "callback_query"],
     });
     const items = [];
@@ -285,23 +288,22 @@ class TelegramPlugin {
   }
 
   /**
-   * Button press -> treated as an ordinary inbound message (identity, group gate,
-   * cold log all apply as usual).
+   * 她按了按钮 → 当成她说了一句话交给共用层，**认人、群闸、冷层全照一条普通消息走**。
    *
-   * · Acknowledge first (answerCallbackQuery) or the button keeps spinning; ack failure is ignored.
-   * · Text is marked as a button press rather than pretending the user typed it.
-   * · The id is `<message id>-btn-<callback id>`: the button message belongs to the bot,
-   *   and pressing the same row twice would otherwise be deduplicated.
-   * · reply_to_message points at the bot's message so group logic sees it as a reply.
+   * · 先应一声（answerCallbackQuery），不然她那边按钮一直转圈。应答失败不挡这条消息。
+   * · 正文写明是按钮，不冒充她打的字：「（点了按钮）选项文字」。
+   * · 编号不用按钮所在那条消息的号 —— 那是**他**发的消息，而且同一排按钮按两次
+   *   会撞号被当重复吞掉；用 `<那条消息号>-btn-<回调 id>`，唯一。
+   * · reply_to_message 指向他那条带按钮的消息：群里据此认「在回他」。
    */
   #buttonPress(cq) {
     if (!cq || !cq.message || !cq.message.chat) return null;
-    this.call("answerCallbackQuery", { callback_query_id: cq.id }).catch(() => { /* only affects the spinner */ });
+    this.call("answerCallbackQuery", { callback_query_id: cq.id }).catch(() => { /* 转圈而已，不挡消息 */ });
     const label = String(cq.data || "").trim();
     if (!label) return null;
-    // Command buttons (e.g. the `/model` menu) carry the full command in their callback data.
-    // Pass it through unchanged so the shared command layer can match it; a prefix would break it.
-    // Unregistered slash text is forwarded as normal text.
+    // 2026-09-23：命令按钮（`/model` 弹的那排）回调里放的是整条命令 —— 原样交出去，
+    // 共用层按「她本人 + 注册过的命令」照常拦；加了「（点了按钮）」前缀斜杠就不在开头，命令失效。
+    // 没注册的斜杠照旧当正文送给他，跟她亲手打一样。
     const isCommand = label.startsWith("/");
     return {
       message_id: `${cq.message.message_id}-btn-${cq.id}`,
@@ -314,11 +316,13 @@ class TelegramPlugin {
   }
 
   /**
-   * Outbound: turn the gate's request into a Telegram action.
+   * 出站：把闸给定的内容变成 Telegram 的动作。
    *
-   * Default deny: only the intents handled below are supported; anything else fails
-   * explicitly. Never silently degrade a sticker/voice/image into plain text while
-   * reporting success.
+   * ⚠️ **默认拒绝**：只处理下面显式写过的意图，别的一律明说发不了。
+   * 这条是拿教训换的 —— 2026-09-18 之前这个函数不看 intent，
+   * 他发贴纸、发语音、发图，出去的**全是一段文字**，而出闸还记成「发成功」。
+   * 他以为说出去了，她那头收到一句莫名其妙的话。
+   * 宁可让他收到「这个发不了」，也不许把贴纸变成字。
    */
   async send({ operationId, chatId, text, intent = "send_text", asset = null, extras = {}, toolArgs = {} }) {
     if (!chatId) throw notSent("插件收到的目标为空——出闸应当先解析目标");
@@ -326,7 +330,7 @@ class TelegramPlugin {
 
     switch (intent) {
       case "send_text": {
-        // Text keeps the injectable sender (tests/scripts); otherwise call the Bot API.
+        // 文字这条保留 sender 注入（测试和脚本在用）；没注入就自己打 Bot API。
         if (this.sender) {
           const nativeId = await this.sender({ chatId, text, operationId });
           return { nativeId: nativeId || null };
@@ -349,7 +353,7 @@ class TelegramPlugin {
       }
 
       case "send_sticker": {
-        // Telegram accepts a file_id (received stickers can be echoed) or a local file.
+        // TG 认 file_id（她发过来的那张能原样回），也能传本地文件。
         let fileId = (toolArgs && toolArgs.file_id) || (extras && extras.file_id) || "";
         if (!fileId && this.stickerBook) {
           const want = (toolArgs && toolArgs.sticker) || (toolArgs && toolArgs.emoji) || text;
@@ -358,8 +362,9 @@ class TelegramPlugin {
             throw notSent("贴纸本里没有「" + String(want || "").slice(0, 30) + "」这张"
               + " —— 换个说法，或者用 #序号");
           }
-          // Fetch a live file_id: stored Telegram file_ids go stale, and a stale one
-          // produces a misleading "sticker not found" error. The stored id is only a fallback.
+          // ⚠️ **现拉，不用存货**：TG 的 file_id 会过期。2026-09-19 实测本地存的
+          // 24 个跟线上现拉的 **0 个一致**，直接用存货一张也发不出去，
+          // 而且报的错会把人带去查"贴纸不存在"。存的那个只当最后兜底。
           fileId = (await this.#liveFileId(found)) || found.fileId;
           if (!fileId) throw notSent("拿不到「" + found.name + "」当下有效的 file_id");
         }
@@ -398,16 +403,17 @@ class TelegramPlugin {
       }
 
       default:
-        // Never silently degrade to plain text.
+        // **不许悄悄降级成发文字。**
         throw notSent("Telegram 这条腿还没接这个意图：" + intent);
     }
   }
 
+  /** 传文件走 multipart。Bot API 的文件接口不吃 JSON。 */
   /**
-   * Current file_id for sticker `index` of a pack.
+   * 拿「这一包第 index 张」**当下有效**的 file_id。
    *
-   * Cached for one hour: avoids an API call per sticker, but packs can change,
-   * so it is never cached forever.
+   * 缓存一小时：他连发几张不该打几次 API，但也不能永久缓存 —— 她随时会往包里
+   * 加新贴纸（2026-09-19 就发现线上 30 张、本地只记了 24 张）。
    */
   async #liveFileId(found) {
     if (!found || !found.setName || !this.token) return "";
@@ -428,23 +434,25 @@ class TelegramPlugin {
     return (s && s.file_id) || "";
   }
 
-  /** File uploads use multipart; the Bot API file endpoints don't accept JSON. */
   async callFile(method, field, filePath, params) {
     if (!this.token) throw notSent("要传文件得给 token（这条路不走 sender 替身）");
     if (!fs.existsSync(filePath)) throw notSent("文件不在：" + filePath);
     const form = new FormData();
     for (const [k, v] of Object.entries(params || {})) form.append(k, String(v));
     form.append(field, new Blob([fs.readFileSync(filePath)]), path.basename(filePath));
-    const res = await fetch(`https://api.telegram.org/bot${this.token}/${method}`, { method: "POST", body: form });
+    const res = await fetch(`${telegramApiBase()}/bot${this.token}/${method}`, { method: "POST", body: form });
     const j = await res.json();
     if (!j || j.ok !== true) throw new Error("Bot API " + method + " 失败：" + JSON.stringify(j).slice(0, 200));
     return j.result;
   }
 
   health() {
-    // Ready if we can actually send: either an injected sender or a token
-    // (send() falls back to this.call("sendMessage")). Checking only `sender`
-    // would mark every token-only production setup offline.
+    // ⚠️ 判据是**能不能发出去**，不是「有没有塞替身」。插头有 token 就能自己打 Bot API
+    // （见 send()：没有 sender 就走 this.call("sendMessage")）。
+    // 原来只认 sender，于是生产装配（按设计只给 token）一律判成 offline，
+    // 出闸 precheck 当场 blocked —— 盒子跑完了、冷层也写了，她那头什么都没收到。
+    // 2026-09-18 玩具实例实测抓到：`blocked reason=channel_offline`，
+    // 而测试里人人都传 sender，所以这个洞一路全绿。
     return { platform: "supported", plugin: "wired",
       availability: (this.sender || this.token) ? "ready" : "offline" };
   }
@@ -519,10 +527,22 @@ function withTimeout(promise, timeoutMs) {
   return Promise.race([Promise.resolve(promise), timeout]).finally(() => clearTimeout(timer));
 }
 
-/** Call the Bot API. Only used when no `call` seam is injected. */
+/**
+ * 打 Bot API。**只在没给 call 替身时用到。**
+ * 放在插头里而不是从老桥 import —— 桥要拷得走（铁律 1），
+ * 「怎么跟 Telegram 说话」本来就该是这条腿自己的事。
+ */
+/**
+ * Bot API 的地址。默认官方；GATE_TELEGRAM_API_BASE 可指到自建的 Bot API server / 反代 / 测试用的假服务。
+ * 每次现读（测试在同一个进程里换）。
+ */
+function telegramApiBase(env = process.env) {
+  return String(env.GATE_TELEGRAM_API_BASE || "").trim().replace(/\/+$/, "") || "https://api.telegram.org";
+}
+
 async function callBotApi(token, method, params) {
   if (!token) throw new Error("Telegram 插头没有 token —— 装配时传进来，别让它自己去文件里找");
-  const res = await fetch(`https://api.telegram.org/bot${token}/${method}`, {
+  const res = await fetch(`${telegramApiBase()}/bot${token}/${method}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify(params || {}),
@@ -532,21 +552,24 @@ async function callBotApi(token, method, params) {
   return j.result;
 }
 
-module.exports = { TelegramPlugin, callBotApi };
+module.exports = { TelegramPlugin, callBotApi, telegramApiBase };
 
-/** Plugin descriptor: name, required config, and how to construct it. */
+/**
+ * 自我介绍（2026-09-18 插头插件化）——**桥靠这段认识它，不用在 main.js 里写死**。
+ * 插头本身一个字没改；这里只是把「叫什么、要哪些配置、怎么造」说出来。
+ */
 module.exports.leg = {
   name: "telegram",
   slot: "telegram",
   configKeys: [["GATE_TELEGRAM_TOKEN", "TG bot token"]],
-  // long polling blocks by itself, no idle sleep needed
+  // 长轮询自己会阻塞，不用额外歇
   poll: { timeoutSecKey: "GATE_POLL_TIMEOUT_SEC", timeoutSecDefault: 25 },
   make({ env, log }) {
     return new TelegramPlugin({
       token: env.GATE_TELEGRAM_TOKEN,
       botId: env.GATE_BOT_ID || "",
       botUsername: env.GATE_BOT_USERNAME || "",
-      // without GATE_STICKER_PACKS there is no sticker book; sending by name fails explicitly
+      // 没配 GATE_STICKER_PACKS = 这条腿没贴纸，插头会明说，不会退成发一行字
       stickerBook: stickerBookFromEnv(env, log),
       stickerOwner: env.GATE_STICKER_OWNER || "",
       log,

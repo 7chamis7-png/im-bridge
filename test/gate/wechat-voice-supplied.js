@@ -1,6 +1,6 @@
 "use strict";
-// A caller-supplied audio file must be sent as a WeChat voice message too.
-// The outbound gate skips TTS in that case, so asset is empty and the file comes via toolArgs.
+// 2026-09-20：他自己递音频（唱歌）→ 微信也要当语音条发。
+// 出闸看到调用方给了文件就跳过合成，asset 是空的；原来这条只认 asset，递进来的文件被无视。
 const assert = require("assert");
 const { WeChatPlugin } = require("../../src/gate/plugins/wechat");
 

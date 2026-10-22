@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// Minimal stdio MCP server: one `ping` tool returning pong-42. Used by the smoke test to exercise tool permission.
+// 最小 stdio MCP：一个 ping 工具，回 pong-42。只给冒烟测试验「工具许可」那条路。
 const rl = require('node:readline').createInterface({ input: process.stdin });
 const send = (m) => process.stdout.write(JSON.stringify(m) + '\n');
 rl.on('line', (line) => {

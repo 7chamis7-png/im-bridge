@@ -38,7 +38,7 @@ test('真实 CLI 2.1.278：九帧都保留，只投一次正文，只在 result 
   assert.equal(events[6].user_message_uuid, undefined); // 不拿帧 uuid 冒充轮次 uuid。
 });
 
-test('D-1：正文含 API Error / safeguards flagged 也仍是模型正文', () => {
+test('D-1：正文含 API Error / safeguards flagged 也仍是他说的话', () => {
   const body = 'API Error: safeguards flagged，刚才屏幕上就是这么写的。';
   const [event] = decode(assistant([textBlock(body)], { isSynthetic: false }));
   assert.equal(event.cliGenerated, false);
@@ -52,7 +52,7 @@ test('D-1：只凭 assistant.error 或 isSynthetic 拦下普通正文和旁白',
     { isSynthetic: true },
     { error: 'rate_limit', isSynthetic: false },
   ]) {
-    const events = decode(assistant([textBlock('正文'), thinkingBlock('旁白')], {
+    const events = decode(assistant([textBlock('抱着呢'), thinkingBlock('蛋还没破')], {
       ...envelope, narration_block_indexes: [1],
     }));
     assert.deepEqual(delivered(events), []);
@@ -68,13 +68,13 @@ test('D-2：旁白索引对应原始 content 位置，保持正文顺序和空�
   const blocks = [
     thinkingBlock('私下思考'),
     { type: 'tool_use', id: 'tool-1', name: 'Read', input: {} },
-    thinkingBlock(' 旁白内容…\n'),
-    textBlock('（正文段落）'),
+    thinkingBlock(' 蛋还没破，喂了小白菜…\n'),
+    textBlock('（记好了 等她）'),
   ];
   const events = decode(assistant(blocks, { narration_block_indexes: [2] }));
   assert.deepEqual(events.map((event) => event.kind), ['thinking', 'unknown', 'narration', 'text']);
   assert.deepEqual(events.map((event) => event.blockIndex), [0, 1, 2, 3]);
-  assert.deepEqual(delivered(events), [' 旁白内容…\n', '（正文段落）']);
+  assert.deepEqual(delivered(events), [' 蛋还没破，喂了小白菜…\n', '（记好了 等她）']);
   assert.strictEqual(events[1].block, blocks[1]);
 });
 
@@ -82,11 +82,11 @@ test('D-2：thinking_tokens 为零、非零或缺失均不改变旁白判据', (
   for (const tokens of [0, 42, undefined]) {
     const events = decode(assistant([
       { ...thinkingBlock('绝不能投'), signature: 'narration', thinking_tokens: 0 },
-      thinkingBlock('要投递的正文'),
+      thinkingBlock('要送给她'),
     ], { narration_block_indexes: [1], thinking_tokens: tokens }, {
       usage: { output_tokens_details: { thinking_tokens: tokens } },
     }));
-    assert.deepEqual(delivered(events), ['要投递的正文']);
+    assert.deepEqual(delivered(events), ['要送给她']);
     assert.equal(events[0].kind, 'thinking');
   }
 });

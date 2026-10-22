@@ -1,5 +1,5 @@
 "use strict";
-// Telegram option buttons and reply-to: the tool socket passes extras, the Telegram leg receives button callbacks.
+// 2026-09-20：TG 的选项按钮和「回复某一条」接通 —— 工具口递 extras、TG 腿收按钮回调。
 const assert = require("assert");
 const { makeToolSocket } = require("../../src/gate/tool-socket");
 const { TelegramPlugin } = require("../../src/gate/plugins/telegram");
@@ -43,7 +43,7 @@ const { TelegramPlugin } = require("../../src/gate/plugins/telegram");
     if (method === "getUpdates") {
       return [
         { update_id: 10, message: { message_id: 7, from: { id: 1 }, chat: { id: 1, type: "private" }, date: 1, text: "嗨" } },
-        { update_id: 11, callback_query: { id: "cbA", data: "火锅", from: { id: 1, first_name: "Owner" },
+        { update_id: 11, callback_query: { id: "cbA", data: "火锅", from: { id: 1, first_name: "Alice" },
           message: { message_id: 99, chat: { id: 1, type: "private" }, from: { id: 555, is_bot: true } } } },
         { update_id: 12, callback_query: { id: "cbB", data: "火锅", from: { id: 1 },
           message: { message_id: 99, chat: { id: 1, type: "private" } } } },
@@ -60,7 +60,7 @@ const { TelegramPlugin } = require("../../src/gate/plugins/telegram");
   assert.notStrictEqual(polled.items[1].message.message_id, polled.items[2].message.message_id);
   assert.ok(calls.some(([m, p]) => m === "answerCallbackQuery" && p.callback_query_id === "cbA"));
   assert.ok(calls.find(([m]) => m === "getUpdates")[1].allowed_updates.includes("callback_query"));
-  ok("按钮回调变成用户的一句话，先应答不让转圈，同一排按两次不撞号");
+  ok("按钮回调变成她的一句话，先应答不让转圈，同一排按两次不撞号");
 
   const d = await tg.toDelivery(press);
   assert.ok(JSON.stringify(d).includes("（点了按钮）火锅") && JSON.stringify(d).includes("99-btn-cbA"));
@@ -74,7 +74,7 @@ const { TelegramPlugin } = require("../../src/gate/plugins/telegram");
   assert.strictEqual(sm.reply_to_message_id, 42);
   ok("发出去的 sendMessage 带着按钮和 reply_to");
 
-  // ——— command buttons (e.g. the /model menu) ———
+  // ——— 2026-09-23：命令按钮（/model 弹的那排）——
   const tg2 = new TelegramPlugin({ call: async (method) => method === "getUpdates"
     ? [{ update_id: 20, callback_query: { id: "cbM", data: "/model claude-fable-5[1m]", from: { id: 1 },
         message: { message_id: 200, chat: { id: 1, type: "private" } } } }] : true });

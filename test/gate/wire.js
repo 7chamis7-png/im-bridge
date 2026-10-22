@@ -37,12 +37,12 @@ function build() {
       wechatImbot: mkPlugin("wechat-bot", "imbot", ALL),
     },
     capabilities: { synthesize_voice: async () => ({}), generate_image: async () => ({}) },
-    identities: { "wechat:wxid_owner": "owner", "wechat-bot:wxid_owner": "owner" },
+    identities: { "wechat:wxid_alice": "alice", "wechat-bot:wxid_alice": "alice" },
     files: { gateEnabled: gateFlag },
   });
 }
 
-// assembly must state explicitly whether there is a box
+// 装配必须显式表态要不要盒子（2026-09-18）
 try {
   const { buildGate: bg } = require("../../src/gate/wire");
   bg({ root: "/tmp/x", coldFile: "/tmp/x/c.jsonl" });
@@ -61,9 +61,9 @@ check("放了文件 = 开", build().enabled(), true);
 fs.unlinkSync(gateFlag);
 check("删了文件 = 关", build().enabled(), false);
 
-console.log("\n[3] 真实微信和微信 bot 各占一格（没有选择器）");
+console.log("\n[3] 真实微信和微信 bot 各占一格（2026-09-18 Alice拆开，没有选择器）");
 g = build();
-check("wechat = owner 自己的微信（a11y 直读库）", g.outbound.plugins.get("wechat").transport, "a11y");
+check("wechat = 她自己的微信（a11y 直读库）", g.outbound.plugins.get("wechat").transport, "a11y");
 check("wechat-bot = im.bot 上那个 bot 账号", g.outbound.plugins.get("wechat-bot").transport, "imbot");
 check("两格是两个插头，不互相顶掉",
   g.outbound.plugins.get("wechat") === g.outbound.plugins.get("wechat-bot"), false);
@@ -72,16 +72,16 @@ check("没接的渠道就是没有", g.outbound.plugins.has("qq"), false);
 console.log("\n[4] 同一句话，两个渠道能力不同，闸给的答案也不同");
 (async () => {
   const turn = { turnId: "t1", replyToEventId: "e1",
-    inboundEvent: { eventId: "e1", channel: "wechat", chatId: "wxid_owner", accountId: "wx" } };
-  g = build();   // owner 的真实微信：无障碍只会打字
-  // no tool names (SPEC rule 2) — ask the outbound gate by intent
+    inboundEvent: { eventId: "e1", channel: "wechat", chatId: "wxid_alice", accountId: "wx" } };
+  g = build();   // 她的真实微信：无障碍只会打字
+  // 不走工具名（那张表已删，见 SPEC 铁律 2）——直接按意图问出闸。
   const r1 = await g.outbound.deliver({ ...turn, text: "看这张", intent: "send_generated_image" });
   check("真实微信发图 → blocked", r1.outcome, "blocked");
   check("原因是平台不支持", r1.reason, "platform_unsupported");
 
   // 换的是**渠道**，不是同一个渠道底下的技术路径
   const botTurn = { turnId: "t2", replyToEventId: "e2",
-    inboundEvent: { eventId: "e2", channel: "wechat-bot", chatId: "wxid_owner", accountId: "wx" } };
+    inboundEvent: { eventId: "e2", channel: "wechat-bot", chatId: "wxid_alice", accountId: "wx" } };
   const g2 = build();
   const r2 = await g2.outbound.deliver({ ...botTurn, text: "看这张", intent: "send_generated_image" });
   check("微信 bot 发图 → sent", r2.outcome, "sent");
@@ -98,12 +98,14 @@ console.log("\n[4] 同一句话，两个渠道能力不同，闸给的答案也�
   check("切换清单六项都在", pre.切换清单.length, 6);
   check("跑完 preflight 依然没被启用", g3.enabled(), false);
 
-  // ==== The assembled gate must work end to end, not just its parts ====
-  // (a single assembly path; two parallel assemblies would drift apart)
-  console.log("\n[6] 装配出来的桥真能跑一轮（owner 说一句 → agent 回一句）");
+  // ==== 2026-09-18：装配必须一次装到「腿能自己活着」 ====
+  // 以前 buildGate 只装到 intake 为止，scripts/gate-box-live.js 自己手搓了一套
+  // pipeline/router/undelivered —— 两套装配并存、各自漂移，正是冷层那个 bug 的病根。
+  // 这一节盯的就是「**装配出来的那条路**真能跑」，不是「零件各自能跑」。
+  console.log("\n[6] 装配出来的桥真能跑一轮（她说一句 → 他回一句）");
   {
     const sent = [];
-    const OWNER_ID = "10001";
+    const HER = "1000000001";
     const tgPlugin = {
       channel: "telegram", transport: "botapi", capabilities: ALL,
       health: () => ({ platform: "supported", plugin: "wired", availability: "ready" }),
@@ -113,33 +115,33 @@ console.log("\n[4] 同一句话，两个渠道能力不同，闸给的答案也�
         chatType: "private", nativeId: String(raw.message_id), text: raw.text,
         receivedAt: new Date().toISOString(), media: [],
       }),
-      // the leg polls by itself: one message first, then nothing — enough to verify fetch → loop → send
+      // 这条腿会自己捞：第一次给一条，之后空手 —— 够验「捞 → 主循环 → 发回去」整条。
       poll: async ({ since }) => (since > 100 ? { items: [] } : { items: [{
         update_id: 100,
         message: { message_id: 2, text: "腿自己捞上来的",
-          chat: { id: Number(OWNER_ID), type: "private" }, from: { id: Number(OWNER_ID) } },
+          chat: { id: Number(HER), type: "private" }, from: { id: Number(HER) } },
       }] }),
     };
     const g6 = buildGate({
-      box: makeFakeBox({ answer: () => "收到" }),
+      box: makeFakeBox({ answer: () => "想你了" }),
       root: path.join(root, "live"),
       coldFile: path.join(root, "live-cold.jsonl"),
       plugins: { telegram: tgPlugin },
-      identities: { ["telegram:" + OWNER_ID]: "owner" },
+      identities: { ["telegram:" + HER]: "alice" },
       files: { gateEnabled: path.join(root, "live", ".gate-enabled") },
-      preferredRoute: { platform: "telegram", chat_id: OWNER_ID },
+      preferredRoute: { platform: "telegram", chat_id: HER },
     });
     check("装配给出了主循环", Boolean(g6.pipe), true);
     check("装配给出了投递口", typeof g6.outlet.deliver, "function");
     check("出闸拿到了「发不出去的账」", Boolean(g6.undelivered), true);
 
     const r = await g6.pipe.ingest({ channel: "telegram", raw: {
-      message_id: 1, text: "在吗", chat: { id: Number(OWNER_ID), type: "private" }, from: { id: Number(OWNER_ID) },
+      message_id: 1, text: "在吗", chat: { id: Number(HER), type: "private" }, from: { id: Number(HER) },
     } });
-    check("owner 这一轮被接住了", r.accepted, true);
+    check("她这一轮被接住了", r.accepted, true);
     await new Promise((res) => setTimeout(res, 20));
-    check("agent 回的话真发出去了", sent.map((x) => x.text), ["收到"]);
-    check("发回的是 owner 那条来路", sent[0].chatId, OWNER_ID);
+    check("他回的话真发出去了", sent.map((x) => x.text), ["想你了"]);
+    check("发回的是她那条来路", sent[0].chatId, HER);
 
     const rows = fs.readFileSync(path.join(root, "live-cold.jsonl"), "utf8")
       .trim().split("\n").map((l) => JSON.parse(l));
@@ -148,19 +150,19 @@ console.log("\n[4] 同一句话，两个渠道能力不同，闸给的答案也�
       ["at", "id", "role", "text"]);
 
     // ==== 腿自己活着：捞 → 主循环 → 盒子 → 出闸 → 发回去，中间不用人手喂 ====
-    // cursor and dead-letter paths are derived from root (given by the caller, nothing hard-coded)
+    // 游标和死信的路径由装配从 root 推出来（调用方给的是 root，代码里没有写死路径）。
     const leg = g6.attach({ channel: "telegram" });
     check("挂得上自己捞消息的腿", typeof leg.run, "function");
     await leg.tick({ timeoutSec: 1 });
     await new Promise((res) => setTimeout(res, 20));
-    check("腿自己捞上来那条也走完了整条路", sent.map((x) => x.text), ["收到", "收到"]);
+    check("腿自己捞上来那条也走完了整条路", sent.map((x) => x.text), ["想你了", "想你了"]);
     const cur = JSON.parse(fs.readFileSync(path.join(root, "live", "cursor-telegram.json"), "utf8"));
     check("消化完了才推游标", cur.cursor, 101);
     await leg.tick({ timeoutSec: 1 });
     check("游标推过去了就不再捞第二遍", sent.length, 2);
   }
 
-  // a read-only gate (explicit box=null) has no main loop
+  // 影子那种只读的桥（显式 box=null）不该有主循环
   {
     const shadow = buildGate({
       box: null, root: path.join(root, "ro"), coldFile: path.join(root, "ro-cold.jsonl"),

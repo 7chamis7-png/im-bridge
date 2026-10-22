@@ -1,9 +1,7 @@
 "use strict";
 /**
- * WeChat media decoding. Pure-function checks always run; the real-data part
- * runs only against a local WeChat database you point it at (read-only):
- *   WECHAT_TEST_KEYS_FILE=<all_keys.json> WECHAT_TEST_IMAGE_KEY_FILE=<image key file>
- * Without them the real-data part is skipped (exit code 0).
+ * 微信媒体解码：拿 2026-09-17 的真实微信库/文件验证。
+ * **只读，不发送、不写生产冷层、不碰Nova。** 读不到真数据就跳过（退出码 0）。
  */
 const fs = require("fs");
 const path = require("path");
@@ -16,8 +14,8 @@ const {
 } = require("../../src/gate/plugins/wechat/media");
 const { WeChatPlugin } = require("../../src/gate/plugins/wechat");
 
-const KEYS = process.env.WECHAT_TEST_KEYS_FILE || "";
-const IMG_KEY_FILE = process.env.WECHAT_TEST_IMAGE_KEY_FILE || "";
+const KEYS = "/root/wxkey/all_keys.json";
+const IMG_KEY_FILE = "/root/wxkey/image_key.txt";
 
 let pass = 0, fail = 0, skip = 0;
 function check(name, got, want) {
@@ -64,33 +62,49 @@ ok("key 不是 16 字节直接报错", threw);
   // ——— 真数据：读不到就跳过 ———
   let data, imageKey, dbDir;
   try {
-    if (!KEYS || !IMG_KEY_FILE) throw new Error("WECHAT_TEST_KEYS_FILE / WECHAT_TEST_IMAGE_KEY_FILE not set");
+    if (process.env.IM_BRIDGE_REAL_WECHAT !== "1") throw new Error("未设 IM_BRIDGE_REAL_WECHAT=1（默认不碰真实微信库/密钥）");
     data = JSON.parse(fs.readFileSync(KEYS, "utf8"));
     imageKey = fs.readFileSync(IMG_KEY_FILE, "utf8").trim();
     dbDir = data._db_dir;
     if (!dbDir || imageKey.length !== 16) throw new Error("密钥不全");
   } catch (e) {
-    console.log("\n跳过真数据部分：" + String(e.message).slice(0, 60));
+    console.log("\nSKIP: wechat-media 真数据部分（" + String(e.message).slice(0, 80) + "）");
     console.log("\n通过 " + pass + " / 失败 " + fail + " / 跳过（真数据段未跑）");
     process.exit(fail ? 1 : 0);
   }
 
   const attachRoot = path.join(dbDir, "..", "msg", "attach");
 
-  // —— received files: filesRoot is derived from the DB dir ——
-  console.log("\n[收文件] filesRoot 从密钥文件推出来");
+  // 2026-10-22：微信 10-20 换过活跃库（message_0.db/media_0.db → _1），钥匙文件
+  // 里哪个库的 key 还在就是哪个活着。这俩测试原来写死 _0，查真实库时会一声不响
+  // 地全跳过（库是空的、key 也没有）——跟生产当时踩的坑是同一个洞，这里也得
+  // 跟着挑活的查，不然这段测试测的是一具空壳，一直绿得毫无意义。
+  function pickActiveRel(prefix) {
+    const rels = Object.keys(data)
+      .filter((k) => new RegExp("^message/" + prefix + "_\\d+\\.db$").test(k))
+      .sort((a, b) => Number(b.match(/_(\d+)\.db$/)[1]) - Number(a.match(/_(\d+)\.db$/)[1]));
+    return rels[0] || "message/" + prefix + "_0.db";
+  }
+
+  // —— 收文件：filesRoot 从库目录推，不靠环境变量（2026-09-21，00:24 她发的 memory.md 那单）——
+  console.log("\n[收文件] filesRoot 从密钥文件推出来 + 按月份找到明文文件");
   {
     const { buildWechatMediaConfig } = require("../../src/gate/plugins/wechat/media-config");
     const { localFilePath } = require("../../src/gate/plugins/wechat/index");
     const cfg = buildWechatMediaConfig({ keysFile: KEYS, imageKeyFile: IMG_KEY_FILE });
     ok("media 配置带 filesRoot（…/msg/file）", /msg[\/\\]file$/.test(cfg.filesRoot || ""));
     check("filesRoot 空 → 不找、返回空（不猜）", localFilePath("memory.md", 1789921485, ""), "");
+    const real = path.join(cfg.filesRoot, "2026-09", "memory.md");
+    if (fs.existsSync(real)) {
+      check("按消息时间的月份找到真文件", localFilePath("memory.md", 1789921485, cfg.filesRoot), real);
+    } else { console.log("  跳过真文件：那份 memory.md 已不在盘上"); skip++; }
   }
 
   // —— 图片：找真图片消息，走 hardlink 定位 + fetchMedia（含 wxgf→jpg）——
   console.log("\n[真图片] hardlink 定位 + 解密 + wxgf→jpg + fetchMedia");
-  const msgDb = path.join(dbDir, "message/message_0.db");
-  const msgKey = (data["message/message_0.db"] || {}).enc_key;
+  const msgRel = pickActiveRel("message");
+  const msgDb = path.join(dbDir, msgRel);
+  const msgKey = (data[msgRel] || {}).enc_key;
   const hlDb = path.join(dbDir, "hardlink/hardlink.db");
   const hlKey = (data["hardlink/hardlink.db"] || {}).enc_key;
   const imageFileLookup = makeImageFileLookup({ hardlinkDb: hlDb, key: hlKey });
@@ -134,16 +148,34 @@ ok("key 不是 16 字节直接报错", threw);
   check("hardlink 查不到就返回空", imageFileLookup("f".repeat(32)), "");
   check("定位不到文件时给 null", locateImageDat({ table: "Msg_" + "0".repeat(32), md5: "f".repeat(32), createTime: 1758000000, attachRoot, imageKey, fileNameHint: "nonexistent.dat" }), null);
 
-  // —— time-window fallback when the XML md5 doesn't match ——
+  // —— md5 对不上时的时间窗兜底（2026-09-21，9-20 19:37 她按原图发的那张）——
   console.log("\n[时间窗兜底] hardlink 按 XML.md5 查不到 → 按 create_time 找候选 → 只认会话目录下真存在的");
   const imageFilesByTime = makeImageFilesByTime({ hardlinkDb: hlDb, key: hlKey });
   check("候选全不存在 → null（不冒充）", locateImageDat({ table: "Msg_" + "0".repeat(32), md5: "f".repeat(32), createTime: 1758000000, attachRoot, imageKey, fileNameHints: ["nope1.dat", "nope2_h.dat"] }), null);
   check("没时间就没候选", imageFilesByTime(0).length, 0);
+  {
+    // 真案例：XML md5 15f8… 在 hardlink 里查不到；同一分钟落盘的 6e45….dat 是转码后的中间版
+    const realT = "Msg_53eb360e3ef5c33f588bb679ff181899", realMd5 = "15f8b4d1065b39e4224babe05c685e39", realTime = 1789904258;
+    const realFile = path.join(attachRoot, realT.replace(/^Msg_/, ""), "2026-09", "Img", "6e450a72eb1f46e13d3c8f559ba78f4d.dat");
+    if (fs.existsSync(realFile) && imageFileLookup(realMd5) === "") {
+      const cands = imageFilesByTime(realTime);
+      ok("时间窗候选里有那张转码版", cands.some((n) => n.startsWith("6e450a72eb1f46e13d3c8f559ba78f4d")));
+      const plugin2 = new WeChatPlugin({ imageKey, attachRoot, imageFileLookup, imageFilesByTime });
+      const r2 = await plugin2.fetchMedia({ kind: "image", md5: realMd5, table: realT }, { createTime: realTime });
+      ok("fetchMedia 这回出图了（之前报 image_not_downloaded）", r2.bytes && r2.bytes.length > 0);
+      check("标成按时间对上的", r2.matchedBy, "time");
+      const plugin3 = new WeChatPlugin({ imageKey, attachRoot, imageFileLookup });   // 没接时间窗 → 行为跟以前一样
+      check("不接时间窗仍然如实报没下载", (await plugin3.fetchMedia({ kind: "image", md5: realMd5, table: realT }, { createTime: realTime })).failed, "image_not_downloaded");
+    } else {
+      console.log("  跳过真案例：那张图已不在盘上（或索引已能按 md5 查到）"); skip++;
+    }
+  }
 
-  // —— 语音：media_0.db 取 blob → SILK → WAV ——
-  console.log("\n[真语音] media_0.db 取 blob + SILK 解码 + fetchMedia");
-  const mediaDb = path.join(dbDir, "message/media_0.db");
-  const mediaKey = (data["message/media_0.db"] || {}).enc_key;
+  // —— 语音：media_N.db 取 blob → SILK → WAV ——（库名跟着钥匙文件挑活的，见上面 pickActiveRel）
+  const mediaRel = pickActiveRel("media");
+  console.log("\n[真语音] " + mediaRel + " 取 blob + SILK 解码 + fetchMedia");
+  const mediaDb = path.join(dbDir, mediaRel);
+  const mediaKey = (data[mediaRel] || {}).enc_key;
   let serverId = "";
   try {
     const rows = sqlc(mediaDb, mediaKey, "SELECT svr_id FROM VoiceInfo LIMIT 1;");
@@ -164,8 +196,9 @@ ok("key 不是 16 字节直接报错", threw);
       ok("fetchMedia 出语音 WAV 字节", r.bytes && r.bytes.length > 0);
       check("fetchMedia 语音 mime", r.mime, "audio/wav");
     } catch (e) {
-      // Missing external tools = environment issue, skip. Missing decoder script =
-      // code bug (wrong path), must fail.
+      // ⚠️ 分清两件事：外部工具没装 = 环境问题，可以跳过；
+      // **脚本本身找不到 = 代码错（路径算错了），必须红。**
+      // 2026-09-18 就栽过：插头搬家后脚本路径错了，这里吞成「跳过」，测试一片绿。
       if (/No such file or directory|can't open file/.test(String(e.message))) {
         console.log("  FAIL 解码脚本找不到（路径算错了，不是环境问题）：" + e.message); fail++;
       } else {

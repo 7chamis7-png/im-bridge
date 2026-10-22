@@ -1,5 +1,5 @@
 "use strict";
-/** Turn binding: readable across processes, survives restarts, unknown -> null. */
+/** 来路落盘：跨进程读得到、重启不丢、查不到就明说 null。 */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");

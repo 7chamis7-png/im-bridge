@@ -1,0 +1,11 @@
+{
+  "_说明": "Iris的模型登记表 —— 上线放到 /root/.iris-gate/models.json。同时要把 iris-env.sh 的 GATE_MODEL 去掉（钉着的话 /model /engine 一律拒绝），默认模型由这里的 default 给。2026-10-21 只登记现在在用的。",
+  "v": 1,
+  "default": "gpt-5.6-sol",
+  "models": [
+    { "id": "gpt-5.6-sol", "label": "GPT-5.6 Sol", "engine": "codex-appserver",
+      "window": 872000, "verified": true, "vision": true, "tools": true, "reasoningOpaque": "codex", "billing": "subscription",
+      "codexConfig": { "model_context_window": 872000 },
+      "note": "~/.codex/models_cache.json：context_window=272000、max_context_window=872000；10-21 Alice定用上限 872000（S3c），跟 CODEX_MODEL_CONTEXT_WINDOW 一致。换模型要重核" }
+  ]
+}

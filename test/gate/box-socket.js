@@ -1,11 +1,11 @@
 "use strict";
 /**
- * box.sock, both ends.
+ * box.sock 两头接线（2026-09-20 晚）
  *
- * Criteria: errors must cross the wire intact (a lost `notAccepted` flag makes
- * the bridge record "unknown" and block the queue), and owed replies must not
- * be lost. serveBox (box side) and makeRemoteBox (bridge side) are connected
- * over a real socket with a fake box — the wire itself is not mocked.
+ * 判准：**错误过线不能变形，欠的话不能少。**
+ * 16:35 那次就是 `notAccepted` 掉在 box.sock 上 → 桥记 unknown → 队列堵死。
+ * 这里拿假盒子把 serveBox（盒子那头）和 makeRemoteBox（桥那头）真的用 socket 连起来测，
+ * 不 mock 线本身 —— 接线层单测两头各自造数据是抓不到这种 bug 的。
  */
 const fs = require("fs");
 const os = require("os");
@@ -27,7 +27,7 @@ async function until(fn, timeout = 3000) {
   return false;
 }
 
-/** fake box: all five methods; deliver behavior is set by the test */
+/** 假盒子：五条口都有，deliver 的行为由测试拨。 */
 function fakeBox() {
   const replyHs = [], doneHs = [];
   let mode = "ok";
@@ -69,7 +69,7 @@ const runtime = {
   check("快照推过来了（fullness 同步可读）", remote.box.fullness(), { used: 1, limit: 10 });
   check("runtime.describe 走快照", remote.runtime.describe(), { id: "fake", model: "m" });
 
-  console.log("[2] errors cross the wire with their flags");
+  console.log("[2] 错误过线：标记不能掉（16:35 那个 bug）");
   box.setMode("notAccepted");
   let err = null;
   try { await remote.box.deliver({ trace_id: "b" }); } catch (e) { err = e; }
@@ -89,7 +89,7 @@ const runtime = {
   check("cancelTurn 走得通", err, null);
   check("之后还能正常 deliver", await remote.box.deliver({ trace_id: "d" }), { turnId: "t-d" });
 
-  console.log("[4] replies: acked after handling; journaled while the bridge is away, replayed on return");
+  console.log("[4] 他说的话：办完才划账；桥不在时记着，回来补");
   const got = [];
   remote.box.onReply(async (e) => { got.push(e.text); });
   box.say({ text: "一" });

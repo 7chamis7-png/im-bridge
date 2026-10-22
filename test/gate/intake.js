@@ -2,8 +2,10 @@
 /**
  * 入站唯一入口：toDelivery（定位） → hydrate（取字节+加工） → 入闸。
  *
- * This file doesn't test decoding (see wechat-media.js); it checks that both ends are really
- * connected, and what the gate and the cold layer each receive once they are.
+ * 这是 2026-09-17 之前缺的那一针。当时的病：`media.ingest` 和 `fetchMedia`
+ * 全仓只有测试在调 —— 微信图片解密解得再对，投到他眼前还是光秃秃一个 `[图片]`，
+ * 整条媒体流水线空转。所以这个文件盯的不是「解码对不对」（那在 wechat-media.js 里测），
+ * 而是**两头有没有真接上**，以及接上之后闸和冷层各自拿到了什么。
  */
 const fs = require("fs");
 const os = require("os");
@@ -28,15 +30,15 @@ const PNG = Buffer.concat([Buffer.from([0x89, 0x50, 0x4e, 0x47]), Buffer.alloc(6
 const WAV = Buffer.concat([Buffer.from("RIFF"), Buffer.alloc(4), Buffer.from("WAVE"), Buffer.alloc(64)]);
 
 /**
- * A fake plugin shaped like the real WeChat plugin: toDelivery only carries locators, bytes
- * come from fetchMedia (toDelivery stays light, synchronous, no large reads).
+ * 一个假插头。形状照着真微信插头抄：**toDelivery 只带定位，字节在 fetchMedia**。
+ * 这正是真插头的做法（toDelivery 保持轻、可同步、不读大文件）。
  */
 function fakePlugin({ fetch, channel = "wechat" } = {}) {
   return {
     channel,
     toDelivery(raw) {
       return {
-        channel, accountId: "acct", senderId: "owner", chatId: "owner", chatType: "private",
+        channel, accountId: "acct", senderId: "她", chatId: "她", chatType: "private",
         nativeId: raw.id, receivedAt: new Date(1758000000 * 1000).toISOString(),
         text: raw.text || "", media: raw.media || [], processing: ["decrypted"],
       };
@@ -52,7 +54,7 @@ function mk({ native = true, transcribe = null, fetchBytes = null } = {}) {
   const dir = fs.mkdtempSync(path.join(root, "g-"));
   const store = new GateStore({ root: dir });
   const cold = new ColdWriter({ file: path.join(dir, "cold.jsonl") });
-  const inbound = new InboundGate({ store, cold, identities: { "wechat:owner": "owner", "telegram:owner": "owner" } });
+  const inbound = new InboundGate({ store, cold, identities: { "wechat:她": "alice", "telegram:她": "alice" } });
   const media = new MediaPipeline({
     caps, fileStore: new FileStore({ root: path.join(dir, "files") }), nativeImageInput: native,
   });
@@ -62,7 +64,7 @@ function mk({ native = true, transcribe = null, fetchBytes = null } = {}) {
 const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse);
 
 (async () => {
-  console.log("\n[1] 微信图片：定位 → fetchMedia 取字节 → 递原图给 agent 自己看");
+  console.log("\n[1] 微信图片：定位 → fetchMedia 取字节 → 递原图给他自己看");
   {
     const g = mk();
     let asked = null;
@@ -76,24 +78,24 @@ const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Bo
     check("fetchMedia 真被调了（这就是以前断掉的那一针）", asked !== null, true);
     check("插头拿到了定位信息", asked.item.md5, "abc");
     check("共用层把「这条是什么时候的」给了插头", asked.ctx.createTime, 1758000000);
-    check("加工到 native（原图递给 agent，不花钱识图）", r.event.media[0].processed, "native");
+    check("加工到 native（原图递给他，不花钱识图）", r.event.media[0].processed, "native");
     check("落仓了，路径可查", fs.existsSync(r.event.media[0].filePath), true);
     check("要递上去的原图在 attach 里", r.event.media[0].attach.length, 1);
-    check("投给 agent 的不再是光秃秃的标签", r.injected.includes("[图片]"), true);
+    check("投给他的不再是光秃秃的标签", r.injected.includes("[图片]"), true);
     check("冷层仍然只存 [图片]（§0.4：存路径会把旧图带回上下文）",
       coldLines(g.coldFile)[0].text, "[图片]");
   }
 
-  console.log("\n[2] 微信语音：SILK→WAV→转写，字得进冷层（否则一换舱就把 owner 的话忘干净）");
+  console.log("\n[2] 微信语音：SILK→WAV→转写，字得进冷层（否则一换舱就把她的话忘干净）");
   {
-    const g = mk({ transcribe: async () => ({ text: "我到家了" }) });
+    const g = mk({ transcribe: async () => ({ text: "老公我到家了" }) });
     const plugin = fakePlugin({ fetch: async () => ({ bytes: WAV, mime: "audio/wav", hintName: "v.wav" }) });
     const intake = makeIntake({ inbound: g.inbound, media: g.media, pluginFor: () => plugin });
     const r = await intake({ channel: "wechat", raw: { id: "w2", media: [{ kind: "voice", serverId: "42" }] } });
 
     check("转写跑了", r.event.media[0].processed, "transcribe");
-    check("投给 agent 的是 owner 说的话", r.injected.includes("我到家了"), true);
-    check("冷层存的也是那句话，不是 [voice]", coldLines(g.coldFile)[0].text, "[语音] 我到家了");
+    check("投给他的是她说的话", r.injected.includes("老公我到家了"), true);
+    check("冷层存的也是那句话，不是 [voice]", coldLines(g.coldFile)[0].text, "[语音] 老公我到家了");
   }
 
   console.log("\n[3] 取不到就明说 —— 空白比明说危险");
@@ -104,11 +106,11 @@ const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Bo
     const r = await intake({ channel: "wechat", raw: { id: "w3", media: [{ kind: "image", md5: "zzz" }] } });
 
     check("失败记在媒体项上", r.event.media[0].failed, "image_not_downloaded");
-    check("投给 agent 的说清楚了取不到", r.injected.includes("取不到 —— image_not_downloaded"), true);
+    check("投给他的说清楚了取不到", r.injected.includes("取不到 —— image_not_downloaded"), true);
     check("没假装成一张正常的图", r.event.media[0].processed, undefined);
   }
 
-  console.log("\n[4] fetchMedia 抛异常也不许吞 —— 一件媒体失败不能拖垮一轮");
+  console.log("\n[4] fetchMedia 抛异常也不许吞 —— 影子挂一条不能拖垮一轮");
   {
     const g = mk();
     const plugin = fakePlugin({ fetch: async () => { throw new Error("sqlcipher 没了"); } });
@@ -122,7 +124,7 @@ const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Bo
   console.log("\n[5] unsupported_kind 不是失败 —— 插头不管这类，还有别的路子");
   {
     const g = mk({ fetchBytes: async () => ({ bytes: PNG }) });
-    // the real WeChat plugin returns unsupported_kind for stickers; stickers have a plain URL, downloaded by the shared layer
+    // 真微信插头对 sticker 就是回 unsupported_kind，而表情有明文直链，下载归共用层
     const plugin = fakePlugin({ fetch: async () => ({ bytes: null, failed: "unsupported_kind" }) });
     const intake = makeIntake({ inbound: g.inbound, media: g.media, pluginFor: () => plugin });
     const r = await intake({ channel: "wechat", raw: { id: "w5",
@@ -136,14 +138,14 @@ const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Bo
   {
     const g = mk();
     const real = path.join(root, "读后感.txt");
-    fs.writeFileSync(real, "owner 写的东西");
+    fs.writeFileSync(real, "她写的东西");
     const plugin = fakePlugin({ fetch: async () => ({ bytes: null, failed: "unsupported_kind" }) });
     const intake = makeIntake({ inbound: g.inbound, media: g.media, pluginFor: () => plugin });
     const r = await intake({ channel: "wechat", raw: { id: "w6",
       text: "[文件] 读后感.txt\n" + real, media: [{ kind: "file", localPath: real }] } });
 
     check("没被搬进文件仓（多一份不多一点信息）", r.event.media[0].processed, undefined);
-    check("路径还在正文里，agent 照样读得到", r.injected.includes(real), true);
+    check("路径还在正文里，他照样读得到", r.injected.includes(real), true);
   }
 
   console.log("\n[7] 插头没有 fetchMedia（TG/iMessage 现在就是）—— 不炸，文本照走");
@@ -162,7 +164,7 @@ const coldLines = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Bo
   console.log("\n[8] extraMedia：采集器额外知道的附件并进来一起加工");
   {
     const g = mk();
-    const real = path.join(root, "owner 拍的.png");
+    const real = path.join(root, "她拍的.png");
     fs.writeFileSync(real, PNG);
     const plugin = fakePlugin({ channel: "telegram" });
     const intake = makeIntake({ inbound: g.inbound, media: g.media, pluginFor: () => plugin });

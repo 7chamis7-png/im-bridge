@@ -1,5 +1,5 @@
 "use strict";
-/** 阶段 1 端到端：插件 → 入闸 → (模拟 CLI) → 出闸 → 插件。隔离跑。 */
+/** 阶段 1 端到端：插件 → 入闸 → (模拟 CLI) → 出闸 → 插件。隔离跑，不碰生产、不碰Nova。 */
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -25,7 +25,7 @@ const sent = [];                                   // 隔离目标：只记录�
 const plugin = new IMessagePlugin({
   sender: async ({ chatId, text, operationId }) => { sent.push({ chatId, text, operationId }); return "native-" + sent.length; },
 });
-const inGate = new InboundGate({ store, cold, identities: { "imessage:+15550001111": "owner" } });
+const inGate = new InboundGate({ store, cold, identities: { "imessage:+15550100001": "alice" } });
 const outGate = new OutboundGate({ store, cold, plugins: new Map([["imessage", plugin]]) });
 
 let pass = 0, fail = 0;
@@ -37,7 +37,7 @@ function check(name, got, want) {
 
 (async () => {
   console.log("\n[1] 一条真实消息走完全程");
-  const d = plugin.toDelivery({ id: 9001, handle: "+15550001111", text: "我到家了", date: "2026-09-17T19:50:00Z" });
+  const d = plugin.toDelivery({ id: 9001, handle: "+15550100001", text: "老公我到家了", date: "2026-09-17T19:50:00Z" });
   check("插件声明了处理链", d.processing, ["none"]);
   check("用平台原生 ID 而不是行号", d.nativeId, "9001");
   const inb = inGate.accept(d);
@@ -48,9 +48,9 @@ function check(name, got, want) {
   check("发出去了", r1.outcome, "sent");
   check("目标是入站那条的来源", r1.channel, "imessage");
   check("插件真收到了", sent.length, 1);
-  check("插件收到的目标由闸给定", sent[0].chatId, "+15550001111");
+  check("插件收到的目标由闸给定", sent[0].chatId, "+15550100001");
 
-  console.log("\n[2] 沉默权归 agent (0.3)：没有正文 = agent 选择不说，不是故障");
+  console.log("\n[2] 沉默权归他 (0.3)：没有正文 = 他选择不说，不是故障");
   const r2 = await outGate.deliver({ turnId: "t2", text: "   ", replyToEventId: inb.event.eventId, inboundEvent: inb.event });
   check("判为沉默", r2.outcome, "silent");
   check("没有发出任何东西", sent.length, 1);
@@ -63,14 +63,14 @@ function check(name, got, want) {
   check("但标注了异物", r3.notes.some((n) => n.type === "artifact"), true);
   check("外发的是原文，没被改写", sent[sent.length - 1].text.includes("user<channel"), true);
 
-  console.log("\n[4] 引用核对：agent 说的 #N 查不到来源");
+  console.log("\n[4] 引用核对：他说的 #N 查不到来源");
   const r4 = await outGate.deliver({ turnId: "t4", text: "你 #99 不是说要删掉吗",
     replyToEventId: inb.event.eventId, inboundEvent: inb.event });
   check("标为待核对", r4.notes.some((n) => n.type === "reference_unverified" && n.seq === 99), true);
   const r5 = await outGate.deliver({ turnId: "t5", text: "你 #1 说到家了",
     replyToEventId: inb.event.eventId, inboundEvent: inb.event });
   check("引用真实存在的号不误报", r5.notes.length, 0);
-  check("能取回 #1 的原文", r5.refChecks[0].originalText, "我到家了");
+  check("能取回 #1 的原文", r5.refChecks[0].originalText, "老公我到家了");
 
   console.log("\n[5] 主动消息未配置目标：报缺，不猜 (0.2)");
   const r6 = await outGate.deliver({ turnId: "t6", text: "在干嘛呢" });
@@ -83,7 +83,7 @@ function check(name, got, want) {
   const lines = fs.readFileSync(coldFile, "utf8").trim().split("\n").map(JSON.parse);
   check("冷层里有 user 也有 assistant", [...new Set(lines.map((l) => l.role))].sort(), ["assistant", "user"]);
   check("沉默那轮也落了冷层", lines.some((l) => l.text === "[本轮未回复]"), true);
-  // markers live in the log; the cold body must be clean because it may be replayed as the agent's own words
+  // 2026-09-18：标记搬去日志了。冷层正文必须干净 —— forge 会把它当成他说过的原话。
   check("冷层就四个字段", [...new Set(lines.flatMap((l) => Object.keys(l)))].sort(),
     ["at", "id", "role", "text"]);
   check("冷层正文不带任何标记", lines.some((l) => /桥附注|undelivered|artifact/.test(l.text)), false);

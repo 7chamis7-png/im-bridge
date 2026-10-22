@@ -70,8 +70,8 @@ function placeholder(envelope) {
   if (envelope && envelope.verdict === "undecoded") {
     return "[未解码内容：插件交付的正文无法读取，原件已留在事件账本 " + id + "]";
   }
-  return "[空事件：既无正文也无媒体，多半是上游取值出错。不要当成 owner 说了什么，"
-    + "更不要猜 owner 想说什么。账本 " + id + "]";
+  return "[空事件：既无正文也无媒体，多半是上游取值出错。不要当成她说了什么，"
+    + "更不要猜她想说什么。账本 " + id + "]";
 }
 
 /**

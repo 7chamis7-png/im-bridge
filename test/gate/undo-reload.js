@@ -1,5 +1,5 @@
 "use strict";
-// After undo removes history the CLI must reload its leaf; also: the parent chain stays intact after file-side removal (regression).
+// undo 删历史后必须让 CLI 重认叶子（2026-09-21 修断链根因）+ 文件侧删完链不断（回归）
 const assert = require("assert");
 const fs = require("fs"); const os = require("os"); const path = require("path");
 const { planUndo, applyUndo } = require("../../src/host/undo");
@@ -10,7 +10,7 @@ const check = (n, ok, extra = "") => { if (ok) { pass++; console.log("  OK   " +
 // —— 造一个隔离的 HOME + gateRoot：3 轮对话 M0/M1/M2 ——
 const home = fs.mkdtempSync(path.join(os.tmpdir(), "undo-home-"));
 const gateRoot = fs.mkdtempSync(path.join(os.tmpdir(), "undo-gate-"));
-const ws = "/srv/agent-workspace"; const tid = "sess1";
+const ws = "/root/nova"; const tid = "sess1";
 const slug = ws.replace(/[/.]/g, "-");
 const projDir = path.join(home, ".claude", "projects", slug);
 fs.mkdirSync(projDir, { recursive: true });
@@ -74,7 +74,7 @@ console.log("[2] 删中间轮：后继接到存活的前驱，链不断");
   check("撤销完成", /撤销完成/.test(out.text), out.text);
   check("box.reloadCli 被调了一次", calls.length === 1 && calls[0].workspaceRoot === ws);
 
-  console.log("[4] handler：agent 正在说话 reloadCli busy → 回执带警告");
+  console.log("[4] handler：他正在说话 reloadCli busy → 回执带警告");
   fs.writeFileSync(tpath, rows.map((r) => JSON.stringify(r)).join("\n") + "\n");
   const box2 = { fullness: () => ({ threadId: tid }), reloadCli: async () => ({ reloaded: false, busy: true }) };
   const reg2 = {};

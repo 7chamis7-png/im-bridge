@@ -1,12 +1,13 @@
 "use strict";
 /**
- * Guard: capability table x implementation.
+ * 能力表 × 实现 的守卫（2026-09-18）
  *
  * **这是一条守卫，不是普通用例。**
  *
- * The capability table says what the PLATFORM supports, not what the plugin
- * implements. If `send()` ignored the intent, a "supported" sticker would go
- * out as plain text while the outbound gate records success.
+ * 病根：能力表回答的是「**平台**能不能」，没有一张表说「**我实现了没有**」，
+ * 而预检只有一个总开关（有没有发送器）。于是 TG 插头声明「贴纸：支持」、
+ * 预检放行、`send()` 却不看 intent —— 出去的是**一段文字**，出闸还记成「发成功」。
+ * 他以为贴纸发出去了，她那头收到一句莫名其妙的话。
  *
  * 所以这里对**每个插头 × 它声明支持的每个意图**跑一遍，结果只允许两种：
  *   · 真做了对应的动作（发图就得调发图的接口）
@@ -104,7 +105,7 @@ async function probe(plugin, intent, calls, textSends) {
     check("**没有把「笑」当文字发出去**", sends.length, 0);
   }
 
-  console.log("\n[4] 微信：没接贴纸本就明说");
+  console.log("\n[4] 微信：没接贴纸本就明说 —— 这是 2026-09-18 真炸过的那条");
   {
     const sends = [];
     const p = new WeChatPlugin({ sender: async (a) => { sends.push(a); return null; }, imageSender: async () => "1" });
@@ -112,7 +113,7 @@ async function probe(plugin, intent, calls, textSends) {
     try { await p.send({ operationId: "o", chatId: "c", text: "笑", intent: "send_sticker" }); }
     catch (e) { msg = e.message; notSent = e.notSent === true; }
     check("明说没接贴纸本", /贴纸本/.test(msg), true);
-    check("标成「确定没出去」（agent 可以换一张再来）", notSent, true);
+    check("标成「确定没出去」（他可以换一张再来）", notSent, true);
     check("没退成发文字", sends.length, 0);
     check("不是 undefined 报错（那是代码 bug 不是拒绝）", /undefined/.test(msg), false);
   }

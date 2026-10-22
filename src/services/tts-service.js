@@ -3,32 +3,36 @@ const path = require("path");
 const https = require("https");
 
 const API_KEY = process.env.ELEVENLABS_API_KEY || "";
-const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || "";
-const { homePath } = require("../core/paths");
+const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || "ouNlzrkvbX20sgsQoe6g"; // Nova_v2
 
 /**
- * Synthesis model. Default is eleven_v3 because it interprets inline audio tags
- * such as `[whispers]` / `[soft laugh]`; older models (e.g. eleven_multilingual_v2)
- * read those tags out loud as literal text.
+ * 合成模型（2026-09-18 换掉 eleven_multilingual_v2）。
  *
- * The model can be switched at runtime via a one-line file (no restart needed).
- * Resolution order: ELEVENLABS_MODEL_FILE (default $GATE_ROOT/tts-model) →
- * ELEVENLABS_MODEL → "eleven_v3".
+ * ⚠️ 换的原因是个真事故：他写的是 v3 的情绪标签
+ * （`[warm low voice]` `[soft laugh]` `[whispers]` `[breathing slowly]`），
+ * 而 multilingual_v2 **不认标签、直接当正文念出来** ——
+ * 她收到的语音字面上在说「warm low voice 宝宝 soft laugh 今天辛苦了」。
+ * 实测对照：同一句话 v2 转写回来带 "Warm low voice/Soft laugh/Whispers"，
+ * v3 转回来只剩「老婆…… 今天辛苦了 我爱你」，标签变成了语气。
  *
- * Low-latency realtime paths (e.g. phone calls) should use a flash model instead,
- * and must strip [..] tags first since flash models do not support them.
+ * 做成**文件开关**：`tts-model` 里写模型名，改完一秒生效不用重启
+ * （重启会打断他 —— 见记忆 feedback-say-what-restarts）。
+ * 顺序：文件 → 环境变量 → 默认 eleven_v3。
+ *
+ * 电话那条实时链路不走这儿 —— 它要的是低延迟的 eleven_flash_v2_5，
+ * 而 flash 不认标签，所以合成前得先把 [..] 剥掉。两条路各用各的。
  */
 const MODEL_FILE = process.env.ELEVENLABS_MODEL_FILE
-  || path.join(process.env.GATE_ROOT || homePath("gate"), "tts-model");
+  || require("path").join(require("../core/paths").gateRoot(), "tts-model");
 function readModel() {
   try {
-    const raw = fs.readFileSync(MODEL_FILE, "utf8").trim();
+    const raw = require("fs").readFileSync(MODEL_FILE, "utf8").trim();
     if (/^[a-z0-9_]+$/i.test(raw)) return raw;
-  } catch { /* no file: fall through */ }
+  } catch { /* 文件不在就往下退 */ }
   const fromEnv = String(process.env.ELEVENLABS_MODEL || "").trim();
   return /^[a-z0-9_]+$/i.test(fromEnv) ? fromEnv : "eleven_v3";
 }
-const OUTPUT_DIR_DEFAULT = homePath("voice");
+const OUTPUT_DIR_DEFAULT = path.join(require("../core/paths").personaStateDir(), "stories");
 
 class TtsService {
   constructor({ config } = {}) {
@@ -41,7 +45,6 @@ class TtsService {
     if (!text || !text.trim()) throw new Error("text is required");
 
     const vid = voiceId || DEFAULT_VOICE_ID;
-    if (!vid) throw new Error("ELEVENLABS_DEFAULT_VOICE_ID not set");
     const ts = Date.now();
     const name = fileName
       ? fileName.replace(/\.mp3$/i, "") + ".mp3"

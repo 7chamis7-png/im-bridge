@@ -1,10 +1,10 @@
 "use strict";
 /**
- * Undelivered ledger (outbound side).
+ * 发不出去的账（2026-09-18）—— 出站那半
  *
- * Core rule: "certainly not sent" and "unknown whether sent" are distinct.
- * The former may be retried; the latter must never be retried automatically -
- * platforms have no idempotency keys, so a resend delivers the message twice.
+ * 核心那条：**「确定没出去」和「不知道发没发」必须分开**。
+ * 前者可以重来，后者绝不能自动重来 —— 9-17 实发撞见过「报超时其实已经发出去了」，
+ * 三个平台都不认幂等键，自动重发 = 她收到两遍同一句话。
  */
 const fs = require("fs");
 const os = require("os");
@@ -26,7 +26,7 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-undeliv-"));
 const turn = (extra = {}) => ({
   turnId: "t1", replyToEventId: "e1",
   inboundEvent: { eventId: "e1", channel: "telegram", chatId: "861", accountId: "tg" },
-  text: "owner 该收到这句", intent: "send_text", ...extra,
+  text: "她该收到这句", intent: "send_text", ...extra,
 });
 
 function build(dir, send) {
@@ -58,7 +58,7 @@ function build(dir, send) {
     check("outcome=blocked", r.outcome, "blocked");
     const rows = undelivered.list();
     check("记了一条", rows.length, 1);
-    check("正文留着（要补发就靠它）", rows[0].text, "owner 该收到这句");
+    check("正文留着（要补发就靠它）", rows[0].text, "她该收到这句");
     check("**可以重来**", rows[0].retriable, true);
   }
 

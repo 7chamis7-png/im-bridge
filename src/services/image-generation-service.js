@@ -16,7 +16,7 @@ class ImageGenerationService {
     }
     const apiKey = normalizeText(this.config.imageApiKey);
     if (!apiKey) {
-      throw new Error("Missing image API key. Set AGENT_IMAGE_API_KEY or OPENAI_API_KEY.");
+      throw new Error("Missing image API key. Set NOVA_IMAGE_API_KEY or OPENAI_API_KEY.");
     }
     const n = clampInteger(args.n, 1, 4, 1);
     const timeoutMs = Number.isFinite(this.config.imageTimeoutMs) ? this.config.imageTimeoutMs : 120_000;

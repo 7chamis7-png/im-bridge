@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const test = require('node:test');
-const { extractTurnInput, assertSubscription, coldSeed } = require('../../cli-host/codex-runtime');
+const { extractTurnInput } = require('../../cli-host/codex-runtime');
 
 test('converts Claude-style base64 images to Codex localImage items', () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-image-'));
@@ -33,40 +33,6 @@ test('keeps text compatibility and ignores unsupported image media', () => {
     assert.deepEqual(extractTurnInput({ message: { content: [
       { type: 'image', source: { type: 'base64', media_type: 'image/svg+xml', data: 'PHN2Zz4=' } },
     ] } }, dir), []);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('reads a bounded delivered-conversation tail for a new thread', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-cold-'));
-  const file = path.join(dir, 'cold.jsonl');
-  try {
-    fs.writeFileSync(file, [
-      JSON.stringify({ role: 'user', text: 'one' }),
-      '{partial',
-      JSON.stringify({ role: 'assistant', text: 'two' }),
-      JSON.stringify({ role: 'system', text: 'ignored' }),
-      JSON.stringify({ role: 'user', text: 'three' }),
-      '',
-    ].join('\n'));
-    assert.deepEqual(coldSeed(file, { maxMessages: 2 }), [
-      { role: 'assistant', content: 'two' },
-      { role: 'user', content: 'three' },
-    ]);
-  } finally {
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-test('accepts ChatGPT subscription auth and rejects API-key auth', () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'codex-auth-'));
-  try {
-    const auth = path.join(dir, 'auth.json');
-    fs.writeFileSync(auth, JSON.stringify({ auth_mode: 'chatgpt' }));
-    assert.doesNotThrow(() => assertSubscription(auth));
-    fs.writeFileSync(auth, JSON.stringify({ auth_mode: 'apikey', OPENAI_API_KEY: 'test-only' }));
-    assert.throws(() => assertSubscription(auth), /API key/);
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }

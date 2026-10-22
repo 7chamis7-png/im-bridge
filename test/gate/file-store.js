@@ -1,7 +1,7 @@
 "use strict";
 /**
- * File store: type sniffed from content, content dedup, existence is checkable.
- * The last check covers ghost inbounds whose attachment path does not exist.
+ * 文件仓：类型从内容嗅、同内容自动去重、存在性是可查的事实。
+ * 最后一条专门为幽灵入站做的 —— 9-17 影子抓到 attachment_path 指向不存在的文件。
  */
 const fs = require("fs");
 const os = require("os");
@@ -48,7 +48,7 @@ check("verify 说 ok", store.verify(r1.filePath).ok, true);
 check("verify 也报类型", store.verify(r1.filePath).mime, "image/png");
 
 console.log("\n[5] 存在性是可查的事实 —— 幽灵入站就卡在这儿");
-const ghost = store.verify(path.join(os.tmpdir(), "no-such-dir-im-bridge", "photo_missing.jpg"));
+const ghost = store.verify("/root/.nova/inbox/telegram/photo_39793.jpg");
 check("幽灵那条附件：文件不存在", ghost.ok, false);
 check("说得出原因", ghost.reason, "文件不存在");
 

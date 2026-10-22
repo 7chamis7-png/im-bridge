@@ -1,9 +1,8 @@
 "use strict";
-// check-in idle trigger.
-// Checks: (1) fires only after N idle ms since the last cold-log record (2) sleeps at most
-// pollMs between re-checks (3) anyone speaking restarts the timer (4) after firing, the next
-// N counts from the check-in (5) only the file tail is read; a cut line is skipped
-// (6) unreadable cold log → process start time (7) the heart beat only looks until idle, then sends
+// check-in 空闲触发（2026-09-22 Alice：「设计成空闲时间触发」「45-55min」）。
+// 盯的事：①冷层最后一条之后空满 N 才敲 ②睡最多 poll 就醒来重算 ③中途有人开口就重新计时
+// ④敲完还空着，从这次 check-in 起再空满 N 又敲 ⑤只读文件尾巴、半截行跳过 ⑥冷层读不到拿启动时刻兜底
+// ⑦接线：心脏那一拍没空够只看一眼不推，空够了真推出一条
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -58,13 +57,13 @@ fs.writeFileSync(cfg, JSON.stringify({ minIntervalMs: 45 * MIN, maxIntervalMs: 5
   const clock = c.makeIdleClock({ coldFile: cold, configFile: cfg, rand: () => r, nowFn: () => now });
   assert.strictEqual(clock.peek().base, T0, "冷层比启动早 → 从启动算");
   now = T0 + 30 * MIN;
-  fs.appendFileSync(cold, row(T0 + 30 * MIN, "user") + "\n");   // owner is back
+  fs.appendFileSync(cold, row(T0 + 30 * MIN, "user") + "\n");   // 她回来了
   r = 1 - 1e-12;   // 取到区间上限
-  assert.strictEqual(clock.peek().base, T0 + 30 * MIN, "owner speaking restarts the timer");
+  assert.strictEqual(clock.peek().base, T0 + 30 * MIN, "她一开口就从那条重新计时");
   assert.strictEqual(clock.peek().thresholdMs, 55 * MIN, "起点变了就重新掷 N");
   now = T0 + 80 * MIN;
-  assert.strictEqual(clock.isDue(), false, "only 50 min since the owner spoke, threshold is 55");
-  // an agent reply counts as activity too
+  assert.strictEqual(clock.isDue(), false, "从她那条起才 50 分钟，没到 55");
+  // 他回她也算对话
   fs.appendFileSync(cold, row(T0 + 81 * MIN, "assistant") + "\n");
   now = T0 + 82 * MIN;
   assert.strictEqual(clock.peek().base, T0 + 81 * MIN);
@@ -91,11 +90,11 @@ fs.writeFileSync(cfg, JSON.stringify({ minIntervalMs: 45 * MIN, maxIntervalMs: 5
   const dir = path.join(tmp, "producers");
   fs.mkdirSync(dir);
   const cold = path.join(tmp, "cold5.jsonl");
-  fs.writeFileSync(cold, row(Date.now()) + "\n");   // owner just spoke
+  fs.writeFileSync(cold, row(Date.now()) + "\n");   // 她刚说过话
   const beat = makeCheckinBeat({ dir, configFile: cfg, coldFile: cold,
     textsFile: path.join(tmp, "无.md"), stateFile: path.join(tmp, "state.json") });
   const first = await beat.tick();
-  assert.strictEqual(first.skipped, true, "just spoke: look only, don't send");
+  assert.strictEqual(first.skipped, true, "刚说过话：只看一眼不推");
   assert.strictEqual(fs.readdirSync(dir).length, 0, "投递口里一条都没有");
   const wait = beat.nextDelayMs();
   assert.ok(wait > 0 && wait <= c.DEFAULT_IDLE_POLL_MS, "睡的时长在 (0, 5 分钟] 里：" + wait);
@@ -114,5 +113,5 @@ fs.writeFileSync(cfg, JSON.stringify({ minIntervalMs: 45 * MIN, maxIntervalMs: 5
   const again = await beat2.tick();
   assert.strictEqual(fs.readdirSync(dir).length, 1, "刚推完紧接着再敲：不重复推（" + JSON.stringify(again.skipped) + "）");
 
-  console.log("checkin-idle: ok");
+  console.log("checkin-idle: 全部通过");
 })().catch((e) => { console.error(e); process.exit(1); });

@@ -1,11 +1,14 @@
-"use strict";
-// Session store — for each binding: which session it is attached to and which model it runs.
+// 会话存储 —— 「这条绑定现在接哪一条会话、跑哪个模型」，就这两件事。
 //
-// On-disk format (sessions.json):
-//    bindings[key].threadIdByWorkspaceRootByRuntime.<runtime>[workspaceRoot] = session id
-//    bindings[key].runtimeParamsByWorkspaceRootByRuntime.<runtime>[workspaceRoot] = { model, modelProvider }
-// Unknown fields are read and written back unchanged; changing the format
-// would silently reattach to a session that does not exist.
+// 2026-09-20 重写。老的那份是原作者的（src/adapters/runtime/codex/session-store.js，415 行），
+// 里面 codex 的双份键、模型目录、审批白名单我们一个都不用，还拖着 model-catalog /
+// approval-command 两个要扔的文件。这份只留新桥真正调的 6 个方法。
+//
+// ⚠️ **磁盘格式一个字节都没改**（sessions.json 照旧）：
+//    bindings[key].threadIdByWorkspaceRootByRuntime.claudecode[workspaceRoot] = 会话号
+//    bindings[key].runtimeParamsByWorkspaceRootByRuntime.claudecode[workspaceRoot] = { model, modelProvider }
+//    不认识的字段（origin / requestId / inboxIds / 顶层那几个）原样读进来原样写回去 ——
+//    格式一变就等于把他接回一条不存在的会话。
 const fs = require("fs");
 const path = require("path");
 
@@ -55,7 +58,7 @@ class SessionStore {
     return this.state.bindings[bindingKey];
   }
 
-  // —— session id ——
+  // —— 会话号 ——
   getThreadIdForWorkspace(bindingKey, workspaceRoot) {
     const ws = str(workspaceRoot);
     if (!ws) return "";
@@ -81,11 +84,11 @@ class SessionStore {
   }
 
   clearThreadIdForWorkspace(bindingKey, workspaceRoot) {
-    // Clear to "" instead of deleting the key: simpler reads after rotation.
+    // 清成空串而不是删键：换舱后下一轮照样从这儿读，少一个「键在不在」的分支。
     return this.setThreadIdForWorkspace(bindingKey, workspaceRoot, "");
   }
 
-  // —— model ——
+  // —— 模型 ——
   getRuntimeParamsForWorkspace(bindingKey, workspaceRoot) {
     const ws = str(workspaceRoot);
     if (!ws) return { model: "", modelProvider: "" };
@@ -99,7 +102,7 @@ class SessionStore {
     const current = this.getBinding(bindingKey) || {};
     const byRuntime = current.runtimeParamsByWorkspaceRootByRuntime || {};
     const previous = byRuntime[this.runtimeId]?.[ws] || {};
-    // Setting only model must not wipe modelProvider (used by /model hot switch).
+    // 只给 model 就别把 modelProvider 抹了（/model 热切换走的就是这条）
     const next = {
       ...previous,
       model: "model" in params ? str(params.model) : str(previous.model),

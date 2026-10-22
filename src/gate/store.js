@@ -1,27 +1,30 @@
 "use strict";
 
 /**
- * Event ledger (inbound numbering and identity normalization).
+ * 事件账本（设计稿 v1.5 §0.1 入闸的「编号 / 身份归一」两件事）
  *
- * Two key decisions:
+ * 两个关键决定，都是Alice 2026-09-17 定的：
  *
- * 1. Sequence numbers are assigned when an event is DELIVERED to the agent,
- *    not when it is received. Otherwise undelivered group messages, filtered
- *    or merged deliveries create legitimate gaps, and "a gap means something
- *    forged" stops being a usable signal. The agent always sees 1, 2, 3...
+ * 1. **编号在「投递给他」那一刻分配，不是收到那一刻。**
+ *    否则群消息不投、被过滤、合并投递都会造成合法跳号，
+ *    「跳号=有假货」这个判据就废了。保证「他看见的号就是连续的 1、2、3」。
  *
- * 2. One sequence per numbering scope, shared across channels and persisted
- *    across restarts. If WeChat #42 and Telegram #42 were numbered separately,
- *    a reference to #42 could hit the wrong message without anyone noticing.
+ * 2. **同一编号域跨渠道共用一条序列，跨重启不清零**（A29）。
+ *    微信 #42 和 TG #42 若各编各的，他引用 #42 会命中另一条 —— 而她发现不了，
+ *    因为两条的语气都能对上他的回复。
  *
- * Storage: append-only event log + atomically written state file; no extra
- * dependencies. All writes use tmp + rename.
+ * 阶段 1 用「append-only 事件日志 + 原子写的游标文件」，不引新依赖。
+ * 写入一律 tmp + rename 换 inode，不原地改。
  */
 
 const fs = require("fs");
 const path = require("path");
 
-/** No hard-coded default root: the caller must supply it. */
+/**
+ * ⚠️ 铁律 1（docs/SPEC.md）：**代码里不许有写死的路径。**
+ * 这里原来默认 "/root/.nova-gate" —— 换台机器就得改代码，拷走跑不起来。
+ * 现在必须由调用方给；没给就当场说清楚缺哪一样，不许猜一个。
+ */
 
 
 function nowIso() {
@@ -42,9 +45,8 @@ class GateStore {
     this.stateFile = path.join(root, "state.json");
     fs.mkdirSync(root, { recursive: true, mode: 0o700 });
     this.state = this.#loadState();
-    // Last real inbound / outbound per channel, so /status shows at a glance which
-    // channel went quiet. No active probes (test messages can trip platform
-    // anti-spam); derived only from events already in the ledger.
+    // 每条腿最后一次真收到 / 真发出的时刻（2026-09-21 Alice要的：/status 一眼看出哪条腿哑了）。
+    // 不另开探针 —— 发测试消息会撞微信风控；只记账本里本来就有的两种事件。
     this.lastSeenByChannel = {};
     this.nativeIndex = this.#loadNativeIndex();
   }
@@ -60,7 +62,7 @@ class GateStore {
     }
   }
 
-  /** { [channel]: { in?: ISO, out?: ISO } } - last real inbound / outbound */
+  /** { [channel]: { in?: ISO, out?: ISO } } —— 最后一次真收到 / 真发出 */
   lastSeen() {
     const out = {};
     for (const [ch, v] of Object.entries(this.lastSeenByChannel)) out[ch] = { ...v };
@@ -72,7 +74,7 @@ class GateStore {
       return JSON.parse(fs.readFileSync(this.stateFile, "utf8"));
     } catch (e) {
       if (e.code !== "ENOENT") throw e;
-      // seqByScope: scope -> highest assigned user_seq
+      // seqByScope: 编号域 -> 已分配的最大 user_seq
       return { seqByScope: {}, eventCount: 0 };
     }
   }
@@ -115,14 +117,13 @@ class GateStore {
 
   #append(ev) {
     fs.appendFileSync(this.eventsFile, JSON.stringify(ev) + "\n", { encoding: "utf8", mode: 0o600 });
-    // every write goes through here (user_input.delivered bypasses appendEvent), so track last-seen here
+    // 所有落账都走这儿（user_input.delivered 不经 appendEvent），所以「最后一次」在这一层记
     this.#noteLastSeen(ev);
   }
 
   /**
-   * Register an inbound event. user_seq is NOT assigned here.
-   * Re-registering the same nativeId returns the original event (redelivery
-   * never consumes a second number).
+   * 登记一条接收事件。**此时不分配 user_seq。**
+   * 同一 nativeId 重复登记返回原事件（重传沿用原号，不吃两个号）。
    */
   registerInbound(delivery, verdict) {
     const key = GateStore.nativeKey(delivery);
@@ -147,7 +148,7 @@ class GateStore {
       verdict: verdict.verdict,
       verifyReasons: verdict.reasons || [],
       identity: delivery.identity || "unknown",
-      userSeq: null,        // assigned on delivery
+      userSeq: null,        // 投递时才填
       deliveredAt: null,
       state: "registered",
     };
@@ -158,8 +159,8 @@ class GateStore {
   }
 
   /**
-   * Assign user_seq at delivery time. Only real user input consumes numbers;
-   * model output, tool results and system wake-ups do not.
+   * 投递那一刻分配 user_seq。只有真实用户输入占号；
+   * 模型输出、工具结果、系统唤醒都不占（A30）。
    */
   assignSeqOnDeliver(ev, scope) {
     if (ev.userSeq != null) return ev.userSeq;
@@ -177,7 +178,7 @@ class GateStore {
     return this.state.seqByScope[scope] || 0;
   }
 
-  /** Fetch the original by number so the outbound gate can verify a #N reference. */
+  /** 按编号取回原文，供出闸核对他引用的 #N */
   findBySeq(scope, seq) {
     let raw;
     try {

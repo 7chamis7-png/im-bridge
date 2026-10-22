@@ -50,10 +50,9 @@ class TurnStore {
   }
 
   /**
-   * Same policy as the outbox: only drop settled rows (completed/failed/rejected),
-   * oldest first. queued/submitting/accepted/unknown are never dropped (unknown
-   * rows are exactly the ones awaiting reconciliation). Cost: trace_id dedup no
-   * longer covers very old rows; 300 is far beyond any realistic redelivery window.
+   * 同 outbox：只丢**已有结论**的（completed/failed/rejected），从最老的丢起。
+   * 任何 queued/submitting/accepted/unknown 一条都不丢 —— unknown 正是等人核对的。
+   * 代价同样是「很久以前的 trace_id 不再去重」，保留 300 条远大于真实重投窗口。
    */
   #pruneSettled() {
     const settled = this.list()

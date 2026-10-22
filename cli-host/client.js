@@ -1,15 +1,16 @@
 'use strict';
 
 /**
- * Box-side proxy with exactly the same shape as what `createRuntime()` returns, so
- * adapters/box-runtime.js only swaps `createRuntime(...)` for `createRemoteRuntime(...)`.
- * Shape mismatches are the most common wiring bug, so this deliberately mirrors the local API.
+ * 盒子这头的替身 —— 长得跟 `createRuntime()` 返回的东西**一模一样**，
+ * 所以 `adapters/box-runtime.js` 基本不用改：本地 `createRuntime(...)`
+ * 换成 `createRemoteRuntime(...)` 就完事。形状对不上是接线活最大的坑
+ * （9-18 切桥五个 bug 四个是字段名/形状不匹配），这里刻意贴着老接口写。
  *
- * Relationship with im-cli:
- *   - cannot connect -> back off and retry, never throw (box may start before the CLI host)
- *   - reconnect      -> attach(lastSeq) first to replay events missed while disconnected
- *   - replay gap     -> emit an `incomplete` marker so the box reconciles from the ingress
- *                       ledger; never pretend the replay is complete
+ * 它跟 `nova-cli` 的关系：
+ *   · 连不上 → 退避重连，**不抛**。盒子先起来、CLI 后起来也能自己接上。
+ *   · 断线重连 → 先 `attach(lastSeq)` 把断线期间他说的话补回来。
+ *   · 补不全 → 把 `incomplete` 事件递上去，让盒子自己去 ingress 台账对账，
+ *     **不假装补全**。
  */
 
 const net = require('node:net');
@@ -20,17 +21,17 @@ const {
 } = require('./protocol');
 const { createLedgerView } = require('./ledger-view');
 
-const log = (...a) => console.log('[im-cli/client]', ...a);
-const warn = (...a) => console.error('[im-cli/client]', ...a);
+const log = (...a) => console.log('[engine-client/socket]', ...a);
+const warn = (...a) => console.error('[engine-client/socket]', ...a);
 
 function createRemoteRuntime({
   socketPath,
   ingressPath,
   /**
-   * Where the last received event seq is stored. Do not skip this file: if the box restarted
-   * from seq 0, im-cli would replay the whole buffer and the owner would get duplicates.
-   * With it persisted, only the last few hundred ms can replay; a normal SIGTERM restart
-   * flushes it and replays nothing.
+   * 收到的最后一个事件号存哪儿。**别省这个文件。**
+   * 盒子重启后如果从 0 开始报号，nova-cli 会把缓冲里**全部**事件重放一遍 ——
+   * 她会收到一堆重复消息。落了盘就只会重放最后那几百毫秒，
+   * 正常 `pm2 restart`（SIGTERM）走 flush 路径，一条都不重。
    */
   cursorPath,
   onEvent = async () => {},
@@ -40,10 +41,10 @@ function createRemoteRuntime({
   callTimeoutMs = 60_000,
   cursorFlushMs = 200,
 } = {}) {
-  if (!socketPath) throw new Error('socketPath is required.');
-  if (!ingressPath) throw new Error('ingressPath is required: get/list read the ledger synchronously, not over the socket.');
+  if (!socketPath) throw new Error('要给 socketPath。');
+  if (!ingressPath) throw new Error('要给 ingressPath：get/list 得同步读台账，不能走 socket。');
   const ledger = createLedgerView({ filePath: ingressPath });
-  /** CLI status, piggybacked on events. status() is used synchronously by the box. */
+  /** CLI 的状态，靠事件捎回来。盒子那头 status() 是同步用的。 */
   let statusCache = { running: false, stopping: false, initialized: false,
     requestedModel: '', actualModel: '', sessionId: '', workspaceRoot: '', threadId: '', model: '' };
 
@@ -57,13 +58,13 @@ function createRemoteRuntime({
   let cursorDirty = false;
   /** id -> { resolve, reject, timer } */
   const waiting = new Map();
-  /** calls queued until connected */
+  /** 连上之前排队的调用 */
   let readyWaiters = [];
-  /** Settles when the current CLI exits. */
+  /** 当前这条 CLI 的死讯。CLI 退出时 settle。 */
   let doneResolve, doneReject;
   let done = new Promise((res, rej) => { doneResolve = res; doneReject = rej; });
-  done.catch(() => {});   // avoid unhandledRejection when nobody listens
-  /** last ensure() params (the CLI may be new after a reconnect) */
+  done.catch(() => {});   // 没人挂 handler 时别炸 unhandledRejection
+  /** ensure 过的参数，重连后要重新 ensure（CLI 可能是新起的） */
   let lastEnsure = null;
 
   function resetDone() {
@@ -76,20 +77,20 @@ function createRemoteRuntime({
     try {
       const n = Number(JSON.parse(fs.readFileSync(cursorPath, 'utf8')).lastSeq);
       return Number.isFinite(n) && n >= 0 ? n : 0;
-    } catch { return 0; }   // missing = start from 0, not an error
+    } catch { return 0; }   // 没有就是从头，不是错
   }
 
-  /** Synchronous write via tmp+rename so a restart never sees a half-written file. */
+  /** 同步落盘。走 tmp+rename，别让重启撞见半截文件。 */
   function writeCursor() {
     if (!cursorPath) return;
     cursorDirty = false;
     try {
       fs.writeFileSync(`${cursorPath}.tmp`, JSON.stringify({ lastSeq, at: new Date().toISOString() }) + '\n');
       fs.renameSync(`${cursorPath}.tmp`, cursorPath);
-    } catch (e) { warn('cursor write failed (a restart will replay):', e.message); }
+    } catch (e) { warn('游标写不进去（重启会重放）：', e.message); }
   }
 
-  /** Debounced; flushCursor() writes the final value on exit. */
+  /** 攒一下再写，别每条事件都落一次盘。退出时 flushCursor() 补齐。 */
   function markCursor() {
     if (!cursorPath) return;
     cursorDirty = true;
@@ -105,7 +106,7 @@ function createRemoteRuntime({
 
   function whenReady() {
     if (connected) return Promise.resolve();
-    if (disposed) return Promise.reject(new Error('remote runtime already disposed.'));
+    if (disposed) return Promise.reject(new Error('这个替身已经关了。'));
     return new Promise((res) => readyWaiters.push(res));
   }
 
@@ -118,7 +119,7 @@ function createRemoteRuntime({
   function send(frame) {
     if (!sock || sock.destroyed) return false;
     try { sock.write(encode(frame)); return true; }
-    catch (e) { warn('write failed:', e.message); return false; }
+    catch (e) { warn('写失败：', e.message); return false; }
   }
 
   async function call(method, args = {}, { timeoutMs = callTimeoutMs } = {}) {
@@ -126,24 +127,24 @@ function createRemoteRuntime({
     const id = 'c-' + nextCallId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (waiting.delete(id)) reject(new Error(`im-cli did not answer ${method} within ${timeoutMs}ms`));
+        if (waiting.delete(id)) reject(new Error(`引擎宿主（nova-cli / iris-cli）没在 ${timeoutMs}ms 内回 ${method}`));
       }, timeoutMs);
       waiting.set(id, { resolve, reject, timer });
       if (!send({ t: CALL, id, method, args })) {
         clearTimeout(timer);
         waiting.delete(id);
-        reject(new Error('connection to im-cli lost'));
+        reject(new Error('跟引擎宿主的连接断了'));
       }
     });
   }
 
-  /** Handle one event: update seq, absorb piggybacked status, dispatch. */
+  /** 收到一个事件：更新号、吃下捎来的状态、分发。 */
   async function handleEvent(frame) {
     if (Number.isFinite(frame.seq)) { lastSeq = frame.seq; markCursor(); }
     if (frame.status) statusCache = { ...statusCache, ...frame.status };
     if (frame.kind === 'runtime') {
       try { await onEvent(frame.payload); }
-      catch (e) { warn('box event callback failed:', e.message); }
+      catch (e) { warn('盒子的事件回调炸了：', e.message); }
       return;
     }
     if (frame.kind === 'stderr') {
@@ -152,17 +153,17 @@ function createRemoteRuntime({
     }
     if (frame.kind === 'runtime.exited' || frame.kind === 'runtime.stopped') {
       const p = frame.payload || {};
-      if (p.failed) doneReject(new Error(p.reason || 'CLI interrupted'));
+      if (p.failed) doneReject(new Error(p.reason || 'CLI 中断'));
       else doneResolve();
       return;
     }
   }
 
-  /** Reverse call from im-cli (canUseTool). */
+  /** nova-cli 反过来调我们（canUseTool）。 */
   async function handleInvoke(frame) {
     const fn = callbacks[frame.fn];
     if (typeof fn !== 'function') {
-      send({ t: REPLY, id: frame.id, ok: false, error: packError(new Error(`box has no callback ${frame.fn}`)) });
+      send({ t: REPLY, id: frame.id, ok: false, error: packError(new Error(`盒子没注册 ${frame.fn}`)) });
       return;
     }
     try {
@@ -192,49 +193,49 @@ function createRemoteRuntime({
       }
       if (frame.t === EVENT) { handleEvent(frame); return; }
       if (frame.t === INVOKE) { handleInvoke(frame); return; }
-    }, (line, e) => warn('bad frame, skipped:', e.message, line.slice(0, 120)));
+    }, (line, e) => warn('坏帧，跳过：', e.message, line.slice(0, 120)));
 
-    // Do not remove: without it the server works fine but this side never reads a byte and every call times out.
+    // ⚠️ 这一行别删：漏了它 server 一切正常、帧也发出去了，但这头一个字都收不到，
+    // 表现是所有调用一路超时。2026-09-20 写这个文件时就漏过一次。
     s.on('data', (chunk) => push(chunk.toString('utf8')));
 
     s.on('connect', async () => {
       connected = true;
       backoff = reconnectMs;
-      log('connected to im-cli');
+      log('连上引擎宿主了');
       flushReady();
-      // Reconnect: replay whatever was emitted while disconnected.
+      // 重连：把断线期间他说的话补回来
       try {
         const info = await call('attach', { lastSeq }, { timeoutMs: 15_000 });
         if (info.status) statusCache = { ...statusCache, ...info.status };
         if (info.hasCli) resetDone();
         if (Array.isArray(info.missed) && info.missed.length) {
-          log(`replaying ${info.missed.length} events missed while disconnected`);
+          log(`补发断线期间的 ${info.missed.length} 条事件`);
           for (const f of info.missed) await handleEvent(f);
         } else if (info.complete === false) {
-          warn('event gap already evicted, replay incomplete - reconcile from the ingress ledger');
+          warn('⚠️ 事件缺口已被挤掉，补不全 —— 盒子该自己去 ingress 台账对账');
           try { await onEvent({ __incomplete: true, lastSeq, serverLastSeq: info.lastSeq }); }
           catch {}
           lastSeq = info.lastSeq;
         }
-        // A restarted CLI host has no live runtime yet. Recreate it from the
-        // most recent ensure request instead of dropping the next turn.
+        // 对面换成新进程时 hasCli 是假的。盒子若还拿着旧的 live，不会再 ensure。
         if (lastEnsure && !info.hasCli) {
           const again = await call('ensure', lastEnsure, { timeoutMs: 120_000 });
           if (again && again.status) statusCache = { ...statusCache, ...again.status };
           if (again && !again.reused) resetDone();
-          log('recreated runtime after CLI host reconnect');
+          log('重连后重新 ensure');
         }
-      } catch (e) { warn('attach failed (continuing):', e.message); }
+      } catch (e) { warn('attach 失败（继续）：', e.message); }
     });
 
-    s.on('error', (e) => { if (connected) warn('connection error:', e.message); });
+    s.on('error', (e) => { if (connected) warn('连接出错：', e.message); });
     s.on('close', () => {
       connected = false;
       sock = null;
       for (const [id, w] of waiting) {
         waiting.delete(id);
         clearTimeout(w.timer);
-        w.reject(new Error('connection to im-cli lost'));
+        w.reject(new Error('跟引擎宿主的连接断了'));
       }
       if (disposed) return;
       setTimeout(connect, backoff);
@@ -245,24 +246,26 @@ function createRemoteRuntime({
   connect();
 
   return {
-    /** Create or reuse. The adapter calls it again after reconnect; the server detects reuse. */
+    /** 装配/复用。重连后 adapters 还会再调一次，server 那头认得出该复用。 */
     async ensure(want) {
       lastEnsure = want;
       const info = await call('ensure', want, { timeoutMs: 120_000 });
       if (info && info.status) statusCache = { ...statusCache, ...info.status };
-      if (info && !info.reused) resetDone();   // new CLI: fresh `done` promise
+      if (info && !info.reused) resetDone();   // 换了新 CLI，死讯重新开一份
       return info;
     },
     async attach() { return call('attach', { lastSeq }); },
 
-    // --- the following mirror createRuntime ---
+    // ——— 下面这些贴着 createRuntime 的接口 ———
 
     /**
-     * Same signature as the local version: one object `{ message, origin, uuid }`.
+     * 签名跟本地版一字不差：**一个对象参数** `{ message, origin, uuid }`。
+     * （写这个文件时我把它写成了三个参数，测试按同样的错签名写所以没抓到 ——
+     * 接线层的测试必须贴着真实调用点写。）
      *
-     * Unlike the local version this is async and callers must await it. It must not be
-     * fire-and-forget: the box relies on the thrown error to know "not persisted = definitely
-     * not delivered, safe to retry". Swallowing it would silently drop the owner's message.
+     * ⚠️ 这个是 **async**，跟本地版不一样，盒子那头调用点必须 `await`。
+     * 不能图省事做成「发出去就不管」：盒子靠它抛错来判断
+     *「没落盘 = 确定没送进去，可以放心重试」。吞掉这个错 = 她的话掉地上。
      */
     enqueue: (payload) => call('enqueue', { payload }),
 
@@ -270,17 +273,18 @@ function createRemoteRuntime({
     stop: () => call('stop'),
     close: async () => { try { await call('close'); } catch {} },
 
-    // get / list / status stay synchronous with identical shapes: the first two read the
-    // ledger file directly (atomic rename), status reads the piggybacked cache.
+    // get / list / status 保持**同步**，形状跟本地版一字不差：
+    // 前两个直接只读台账文件（rename 原子，读不到半截），第三个读事件捎来的缓存。
     get: (uuid) => ledger.get(uuid),
     list: (state) => ledger.list(state),
     status: () => ({ ...statusCache }),
 
     setModel: (model) => call('setModel', { model }),
+    usage: (args) => call('usage', args || {}, { timeoutMs: 30_000 }),
     get done() { return done; },
     get connected() { return connected; },
 
-    /** Flush the cursor before exit so a normal restart replays nothing. */
+    /** 退出前把游标补齐 —— 正常重启走这条路，一条事件都不会重放。 */
     flushCursor,
 
     dispose() {

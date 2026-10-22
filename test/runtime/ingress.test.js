@@ -17,7 +17,7 @@ function fixture(t, io) {
 
 const message = (uuid = 'a', scope = 'session-a') => ({
   uuid, scope, payload: {
-    uuid, message: { uuid, text: 'owner message' },
+    uuid, message: { uuid, text: '她的原话' },
     origin: { channel: 'telegram', threadId: 'thread-a', recipient: 'person-a' },
   },
 });

@@ -1,6 +1,6 @@
 "use strict";
-// send_image / send_file call their text `caption` (in args), but plugins read `text`.
-// The tool socket must map it, otherwise captions are silently dropped.
+// 2026-09-20：send_image / send_file 的配字叫 caption（在 args 里），插头只认 text。
+// 原来工具口只看 req.text → 配字悄悄丢了、冷层也空。这里盯住它。
 const assert = require("assert");
 const { makeToolSocket } = require("../../src/gate/tool-socket");
 

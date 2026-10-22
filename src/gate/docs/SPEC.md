@@ -1,210 +1,601 @@
-# Gate specification
+# 新桥规格（Alice 2026-09-18 凌晨定，Keeper 记录）
 
-This document defines the gate (the message pipeline in `src/gate/`): its
-architecture, iron rules and the protocols between its parts. Code comments
-refer to its sections (e.g. "SPEC §4").
+> 这份是**动代码之前的定义**。架构、铁律、四份协议都在这儿。
+> 下一个我：开工前先读完这份，**不要按老桥的框架推进**——9-17 夜我跑偏过两次，
+> 一次是把闸嫁接到老桥门上（浅接），一次是拿老桥的家具摆位当新桥的账。都被她当场打回。
 
-## 0 What it is
+## 0 这是什么
 
-The gate is a **message pipeline**, independent of any particular agent
-runtime. It connects chat platforms (plugins, "legs") to one agent session (the
-"box"). Scheduled or proactive content (check-ins, reminders, etc.) is produced
-by **event producers** that push into the gate; they are not part of it.
+新桥是**消息管道**，独立的一件东西。目标是 **cyberboss 整个退休**，由它接管管道那部分；
+工具那堆和生活那堆（晨笺、脉、驱力、记忆库…）从 cyberboss 里摘出去自己站着。
 
-Test of success: copy `src/gate/` to a clean machine, provide configuration and
-credentials, and it runs.
+判据一句话：**把 `src/gate/` 拷到一台干净的机器，配上配置和密钥就能跑。**
 
-## 1 Architecture
+## 1 架构（她画的）
 
 ```
-                      producers (check-ins, reminders, ...)
-                                   │  pushed in, not routed through plugins
-                                   ▼
-owner ─→ inbound plugin ─→ shared layer ─→ [ box / CLI ] ─→ shared layer ─→ outbound plugin ─→ owner
-         fetch from          identify·number   the agent      segment·pace      platform actions
-         platform            verify·cold log   five-call       clean·ledger
-         decrypt/decode      batch·transcribe  interface       cold log
+                        晨笺 / check-in / 日记 / 脉 / 状态条注入
+                                     │  直接进，不过桥
+                                     ▼
+她 ─→ 入站插头 ─→ 共用层 ─→ 【盒子 / CLI】 ─→ 共用层 ─→ 出站插头 ─→ 她
+      从平台捞      认人·编号      Nova在里面      分段·节奏      变成平台动作
+      解密解格式    验收·写冷层    五条口子        清洗·记账
+      一腿一份      合批·转写识图  换底座不动桥    写冷层
 ```
 
-- **Plugins** guarantee two things: messages can be received and sent. Platform
-  specifics (decryption, decoding, download) live only in the plugin.
-- **The shared layer** exists once; every plugin gets it automatically.
-- **The box is replaceable** and not part of the gate. Its interface has five
-  calls: deliver a turn / get replies out / turn done / rotate (new session) /
-  fullness. Runtime-specific work (resume, trimming, fallback) stays inside the box.
-- **Producers are not part of the gate.** Removing them leaves the gate working.
+- **插头**只保证两件事：**收得到、发得出**。平台的脏活（解密、解格式、下载）只有它知道，归它。
+- **共用层**一份就够，四条腿自动都有。
+- **盒子是可换零件**，不装进桥。接口五条：送一轮进去 / 把话拿出来 / 这一轮完了 / 开个新舱 / 现在多满。
+  claude 的脏活（resume、forge、掉档、裁剪）全关在盒子里，一条都不漏到桥上；
+  Iris那个 codex 盒子装它自己的脏活，桥这头看到的一模一样。
+- **晨笺那些是事件生产者，不是桥的一部分**。删掉 check-in，桥照样活。
 
-### Decision in the shared layer, action in the plugin
+### 分界线：决定在共用层，动作在插头
 
-| Concern | Decision | Action |
+| 事 | 决定 | 动作 |
 |---|---|---|
-| Segmenting | how many parts, what spacing → shared | send the parts → plugin |
-| Typing indicator | whether to show → shared | which platform API → plugin |
-| Image batching | shared only | — |
-| Transcription / vision | shared end-to-end | plugin provides clean bytes |
-| Decryption / decoding | — | plugin only |
+| 分段 | 切几段、隔多久 → 共用层 | 把这几条打出去 → 插头 |
+| 正在输入 | 该不该显示 → 共用层 | 调哪个平台接口 → 插头 |
+| 图片合批 | 纯共用层，插头不知道有这回事 | — |
+| 转写 / 识图 / 声学 | 共用层从头包到尾 | 插头只交一份干净字节 |
+| 解密 / 解格式 | — | **只有插头知道**，纯独有 |
 
-## 2 Iron rules
+## 2 铁律（四条，都能一行命令自查）
 
-1. **Portable**: nothing under `src/gate/` requires files outside it; no
-   hard-coded paths (everything is passed in); external commands it depends on
-   (ffmpeg, zstd, sqlcipher, decoder scripts) are checked at startup and
-   reported immediately if missing.
-2. **No tool names in the gate.** The gate exposes a single outlet: "I want to
-   send this (intent + content)". It does not know who calls it. Renaming,
-   removing or replacing tools requires no gate change. There is no "send to
-   whom" parameter on the outlet at all.
-3. **All tools are removable.** Removing any tool leaves the core running.
-4. **No extra fields in the cold log** (see §6).
+1. **拷走能跑**：不 `require` 自己目录外的任何东西；代码里不许有写死的路径（全靠传参）；
+   依赖的外部命令（ffmpeg / zstd / sqlcipher / 解语音的脚本）**启动时点名**，缺了当场报，
+   不许等她发条语音才炸。
+2. **不许出现任何工具名**。桥只开**一个投递口**：「我要发这个（意图 + 内容）」。谁调都行，
+   桥不认识调用者。工具改名、删掉、换一批，桥一行不动。
+   —— 「发给谁由桥定」照样成立：**那个口子上根本没有"发给谁"这个参数**。
+3. **工具全部可拆卸**：删掉任何一个（含 lmc5），核心照跑，只是少个功能。
+4. **不许往冷层加字段**（见 §6）。
 
-Self-check:
+自查：
 ```bash
+# 只看代码行，注释里讲历史的不算（所以排除 ` * ` 开头）
 grep -rn 'require("\.\./\.\./\|require("\.\./services\|require("\.\./core\|require("\.\./adapters' \
-  src/gate/ --include=*.js | grep -v 'plugins/.*require("\.\./\.\./errors")'   # rule 1 → 0 hits
+  src/gate/ --include=*.js | grep -v 'plugins/.*require("\.\./\.\./errors")'   # 铁律 1 → 0
+grep -rn '"/root/' src/gate/ --include=*.js | grep -v shadow.js | grep -v ':\s*\*'  # 铁律 1 → 0
+grep -rniE 'cyberboss_|lmc5|diary_|pulse' src/gate/ --include=*.js                   # 铁律 2/3 → 0
 ```
 
-## 3 Envelope (unified message format)
+**2026-09-18 03:2x 实测：三条全过。**（插头 `plugins/wechat/index.js` 引用共用层的
+`../../errors` 是允许的——那是桥内部，不是跳出桥。）
 
-Everything that enters the box has this shape, whether it came from the owner
-or from a producer. Origin is a **structured field**, never a line of text in
-the body.
+## 3 信封（统一消息格式）
+
+**所有**进盒子的东西都长这样，不管是她说的还是晨笺推的。来路是**结构里的字段**，
+不是正文里的一行字——前面贴多少东西都顶不掉它。
+（8-29 她在 TG 说话他回到微信去、7 月那批"她没发过的消息"，根子都是靠读正文猜来路。）
 
 ```
 Envelope
-├─ trace_id          identity of one message through inbound → box → outbound; on every log line
-├─ seq               sequence number, assigned when delivered to the box; serial across plugins
+├─ trace_id          一条消息的身份证，贯穿入站→盒子→出站，每条日志都带它
+├─ seq               编号，闸在「投递给他」那一刻发；四条腿串行发号
 ├─ created_at
 ├─ source
-│   ├─ kind          user | system | box
-│   ├─ producer      free-form producer name (not validated or enumerated by the gate)
-│   ├─ platform      telegram | imessage | wechat | …   (empty when kind≠user)
-│   ├─ chat_id       native, bare (no "telegram:" prefix)
-│   ├─ sender_id     real platform id — never identify people by nickname
-│   └─ native_id     platform message id, used for inbound dedup
+│   ├─ kind          user | checkin | diary | pulse | system   ← 这条是谁产生的
+│   ├─ platform      telegram | imessage | wechat | …（kind≠user 时为空）
+│   ├─ chat_id       平台原生、**裸的**（不带 "telegram:" 前缀）
+│   ├─ sender_id     平台真实 id，**绝不用昵称认人**
+│   └─ native_id     平台消息 id，入站去重靠它
 ├─ target
-│   ├─ person
-│   ├─ platform / chat_id    resolved destination
-│   └─ policy        which routing tier resolved it (see §4)
-├─ identity          who it is; unrecognised = unknown = not delivered
-├─ verdict           ok | undecoded | no_content
-├─ processing[]      none | decrypted | transcribed | vision | acoustic
+│   ├─ person        发给谁（现在只有她）
+│   ├─ platform / chat_id    解析出来的落点
+│   └─ policy        按哪一档解析出来的（见 §4）
+├─ identity          认出来是谁；认不出 = unknown，**不投递**
+├─ verdict           验收结论：ok / undecoded / no_content
+├─ processing[]      做过哪些加工：none / decrypted / transcribed / vision / acoustic
 ├─ payload
 │   ├─ text
 │   └─ media[]       {kind, ref, path, bytes_len, …}
-└─ cold              whether it goes to the cold log and with what text
+└─ cold              这条进不进冷层、进的时候正文长什么样
 ```
 
-`schema_version` is attached to on-disk log records only, never to cold-log
-records (§6) and not to in-process objects.
+**schema_version 只贴在写到盘上的记录上**（冷层、日志、投递记录），进程内传的不贴。
+理由是旧记录：冷层里躺着四万八千条，今天写的三个月后还要读。
+（9-17 改冷层格式那次，新旧记录混在一个文件里只能靠结构猜。）
 
-## 4 Routing — five tiers
+## 4 路由五档
 
-Evaluated in order; first match wins:
+按顺序往下走，命中即停：
 
-1. **Original route** (this turn answers a specific inbound message) → reply there.
-2. **Explicit target** (system producers only; tools cannot set one) → use it.
-3. **Proactive message** → `last_active_route`. Only the owner's inbound
-   messages count as activity, never the agent's outbound messages.
-4. If that route is unusable → `preferred_route` (from configuration).
-5. Nothing → **hold, do not guess**.
+1. **有原路**（这一轮是回她某条入站的）→ 原路返回
+2. **有显式 target**（只有系统生产者可以给；**工具不行**）→ 按它
+3. **主动消息** → `last_active_route`
+   ⚠️ 最近活跃路**只算她的入站，不算他的出站**。8-29 投错渠道栽在这儿。
+4. 那条失效 → `preferred_route`（**配置里写，不是代码里写死**）
+5. 都没有 → **暂存，不猜**
 
-## 5 Delivery semantics
+## 5 投递语义
 
-### Two kinds of failure
+### 两种失败必须分开
 
-| | Criterion | Handling |
+| | 判据 | 怎么办 |
 |---|---|---|
-| **Definitely not sent** | failed before touching the platform, or platform explicitly rejected | may retry or use another plugin |
-| **Unknown** | timeout, connection drop, crash mid-send | **never auto-resend**; goes to dead letters for review |
+| **确定没出去** | 还没碰到平台就挂了（文件不在、没登录、参数不对）；平台明确回绝（chat not found） | 可以重试、可以换条腿 |
+| **不知道发没发** | 超时、连接断、进程崩在半路 | **绝不自动重发**，进 dead-letter 等核对 |
 
-Supported platforms do not honour idempotency keys; a resend is a duplicate.
+9-17 实发撞见过：发送器报超时，其实一秒前已经发出去了。**自动重发 = 她收到两遍。**
+三个平台（TG / 微信 / iMessage）**都不认幂等键**，发两次就是两条，平台不会帮我们挡。
 
-### Dedup
+### 去重
 
-- **Inbound**: a platform message (`native_id`) is processed once; a redelivery
-  keeps its original seq and is not written to the cold log twice.
-- **Outbound**: record "about to send" before sending and the result after. A
-  crash in between leaves an "unknown" record that is surfaced, not resent.
+- **入站**：同一条平台消息（`native_id`）只处理一次——重复送来沿用原号，不吃第二个号，不重复写冷层。
+- **出站**：投递前先记一笔「要发这条了」，发完记结果。进程崩在中间，重启后看见
+  「记了要发、没有结果」→ 那条是**不知道**，不自动补发，但要显眼地躺着，不许无声丢失。
 
-### Ordering
+### 顺序
 
-- The box handles one turn at a time; the gate must not bypass the queue.
-- Sequence numbers are assigned serially in one process across all plugins.
-- Outbound ordering on some platforms is not guaranteed; spacing between
-  segments mitigates it.
+- 盒子那头本来就是**一轮说完才说下一轮**；新桥要做的是**别把它弄丢**（插头不许绕过排队并发塞）。
+- **编号必须串行**：四条腿同时来消息，谁先拿到小号。这要求四个插头在**同一个进程**里发号
+  —— 这也是老采集进程必须退休、收进插头的理由之一。
+- 出站 TG 连发偶尔乱序是**平台自己的毛病**，锁不住，靠间隔（也正好是她要的说话节奏）。
 
-### Silence
+### 沉默
 
-No text = the agent chose not to reply; the cold log records "no reply this
-turn". **Content that could not be delivered must never look like silence** —
-it is recorded in the event log (§6).
+没正文 = 他选择不说。冷层记一条「本轮未回复」。
+**「有内容但发不出去」绝不许伪装成沉默**——那条必须留痕，只是留在日志里（见 §6）。
 
-## 6 Cold log and event log — two files joined by id
+## 6 冷层与日志：两份，用 id 串
 
-### Cold log (for memory lookup and session warm-up)
+她定的：**纯冷层是给 LLM 查记忆的，日志才是查缺补漏用的。**
 
-Exactly four fields: `id` / `role` / `at` / `text`.
+### 纯冷层（给他查记忆 / 给 forge 塞回上下文）
 
-- **No additional fields.** Cold-log text may be replayed into a session, so
-  technical fields would become noise in the agent's context.
-- Delivery notes ("not delivered", etc.) never go into the text; they go into
-  the event log.
-- `cold-writer.js` is the **only** writer; plugins cannot reach it.
-- Recommended: keep an append-only archive copy on separate storage; cleanup
-  scripts touch only the primary copy.
+**只有四样**：`id` / 谁说的 / 什么时候 / 说了什么。
 
-### Event log (for tracing)
+- **不许加字段**。forge 把冷层原话当真实轮塞回他的会话，混进技术字段就得先剥一遍，
+  剥不干净他上下文里就会冒出 `schema_version: 1` 这种噪音。
+- 「这条没发出去」**不写进正文**。现在出闸往正文尾巴塞 `[桥附注] [{"type":"undelivered"…}]`，
+  那是脏的 —— forge 会把它当成他说过的原话。标记搬去日志。
+- **双写：主份 + 归档。** 两份一模一样不等于安全（9-17 差点删掉两个月对话，那个脚本按判据扫全库，
+  两份都在它扫得到的地方）。所以：
+  - 归档**只许追加**，桥不提供任何删改的口子
+  - 物理上跟主份分开放
+  - 任何清理脚本**只许碰主份**，碰归档必须人手确认
+  - 归档格式跟主份一样全（不是精简版），否则重建不回来
+  - 归档跟着每天的 GitHub 备份走
 
-trace_id, seq, plugin, event id, turn id, verdict, delivered or not, failure
-kind, `schema_version`, and the **id of the cold-log record** it refers to. No
-message text — text lives only in the cold log.
+### 日志（给追溯）
 
-## 7 Status view (optional, read-only, outside the core)
+trace_id、seq、走的哪条腿、事件号、轮号、验收结论、出去没出去、失败是哪种、
+schema_version，外加**指向冷层哪一条的 id**。
 
-A table of time / speaker / plugin / status / text (joined from the cold log by
-id), searchable by trace_id:
+**不复制正文**——正文只有冷层一份。面板要看正文时按 id 去冷层取。
 
-| Seen | Meaning |
+### ⚠️ 搬家清单里的一条
+
+现网冷层是**另一种形状**（13 个字段：bindingKey / workspaceRoot / threadId / messageId /
+attachments…），而且**有十个东西在读它**：forge、开场轮注入、日记摘要、会话恢复、换舱快照…
+新桥把冷层改干净，这十个得跟着调。**格式不许悄悄换，搬家那天一起切。**
+
+## 7 面板（只读，独立，不进桥核心）
+
+她的原话：没消息回复的时候自己去查，看是不是投递层的问题。
+
+一张表：时间 / 谁说的 / 走哪条腿 / **状态** / 正文（按 id 从冷层取）+ 按 trace_id 查。
+
+状态那一列回答她真正要问的：
+
+| 看到 | 意思 |
 |---|---|
-| record marked not delivered | the agent replied; delivery layer failed |
-| record without mark | delivered; problem is on the platform side |
-| only "no reply this turn" | the agent chose not to reply |
+| 有这条、标着没发出去 | 他说了，卡在投递层 |
+| 有这条、没标记 | 发出去了，问题在平台那头或她没收到 |
+| 只有「本轮未回复」 | 他**选择没说**，不是投递的事 |
 
-## 8 Component notes
+附带好处：**搬家那天它就是验收台**。新桥接管后到底在不在干活，刷一下就知道
+——9-17 夜「闸的账本 0 条」那件事，有这个面板她一眼就看见了，不用我查一个多小时。
 
-- **Receivers** (`receiver.js`) advance a plugin's cursor only after a message is
-  fully digested; an undigestible message goes to dead letters without blocking
-  the rest; a failed fetch leaves the cursor untouched.
-- **Push-based platforms** (e.g. iMessage) write each pushed message to disk
-  (`tmp → rename`) and `poll()` reads from disk, so they share the polling
-  interface and survive crashes.
-- **Capabilities** are default-deny per plugin: a plugin handles only intents
-  it explicitly implements; anything else is reported as unsupported, never
-  degraded into a text message.
-- **Segmentation** (`segment.js`) is shared: split on blank lines only (single
-  newlines are formatting), merge very short parts, cap the number of bubbles,
-  hard-split as a last resort. Platform length limits are the plugin's job.
-  Only `send_text` is segmented; the cold log stores the full text, not the fragments.
-- **Groups** (`group.js`) are a shared-layer concern, not a plugin: allow-list
-  keys are `channel:groupId`; wake rules are decided here from facts the plugin
-  provides (`chatType`, `senderId`, `senderName`,
-  `addressing{mentionsMe,repliedToMe,senderIsBot}`); owner identity comes from
-  platform ids, never display names; commands are matched before batch
-  rendering and are never authorised by group identity.
-- **Outlet** (`outlet.js`) is the single "send this" entry point with no
-  destination parameter; destination fields supplied by callers are dropped
-  and logged.
-- **Box contract** (`box.js`): five calls, validated at assembly; a fake box is
-  provided for tests. `buildGate` requires `box` explicitly (`null` for
-  read-only use such as the shadow).
-- **Host** (`src/host/main.js`, not part of the gate): reads configuration from
-  environment variables, assembles the gate, attaches plugins, runs forever,
-  writes a heartbeat file. `--check` validates without running. Persona
-  (`GATE_PERSONA`) decides *what* is injected; the box decides *how*.
-  Injection goes to the CLI only, never into the cold log; an injection failure
-  is logged loudly but never drops the owner's turn. One persona per process.
+## 8 还没做的（只讲新桥，不提老桥）
 
-## 9 Non-goals
+1. **插头自己从平台收消息**
+   - ~~TG 那条~~ **2026-09-18 凌晨做完（捞 + 游标那半）**：
+     `plugins/telegram.js` 加了 `poll()`（自己打 Bot API 的 getUpdates，token 传参、
+     不从文件里找）；`receiver.js` 是共用层那半 —— **消化完了才推进游标**、
+     一条消化不了进死信但**不卡住后面的**、捞不上来（网断）游标一动不动。
+     测试 18 项，含「重启之后不重复投也不漏投」。
+   - ~~微信直读~~ **2026-09-18 做完**：`plugins/wechat/index.js` 有 `poll()` 了。
+     微信不像 TG 有接口可以要消息，只能去它自己的 SQLCipher 库里翻。翻的那套
+     （解密、表名匹配、四条过滤）在**同目录的 `db-watch.py`** —— 从老桥
+     `linux-db-watch.py` **原样抄**，不是重写（Alice两次叫停：「有这个必要吗」
+     「其实也可以抱在一起 毕竟没有桥看门狗也没意义」）。
+     抱在一起的理由是**铁律 1**：看门狗离了桥没有存在意义，而它住在 `src/adapters/`
+     下，`src/gate/` 就拷不走。先例是同目录的 `wx-voice-decode.py`。
+     抄过来只改三处：路径从参数来（必填，无默认）· 产出交给调用方 ·
+     **游标吃进来吐出去、自己不落盘**（新桥的规矩是消化完才算数；老桥那份读完就推进，
+     崩在中间那几条就没了）。只留 `--once`，常驻循环那半删掉（没人走的路不留）。
+     真库实测：**读 356 条 0.7 秒**、转交付、入闸接住 4/4、冷层四字段、
+     **带游标第二次读 0 条**。测试 23 项（含逐条点名那四个最容易漏的过滤条件）。
+     ⚠️ **老桥那份还在 pm2 42 跑着，切换那天才删** —— 两份会漂移，
+     `test/gate/wechat-dbwatch.js` 盯着 `query_new_messages` 一字不差。
+   - ❌ **老网关（im.bot）那条不做了**（Alice 2026-09-18）：近 7 天只有 73 条、
+     最后一次是 22 小时前，pm2 里根本没有它的进程。微信主力已经是 VPS 这条。
+     给一条要退休的路写新代码，就是 9-17 那种「干一晚上全是要扔的」。
+   - ~~iMessage~~ **2026-09-18 做完**。它是**推**不是捞（Spectrum SDK 订阅，
+     而且老桥注释写着「全机只有这一条连接，两个 SDK 实例会抢同一批入站」）。
+     我一开始说它「有点麻烦」，其实**今晚已经有现成的形状了**：
+     **推来的先落盘，`poll()` 从盘上读** —— 一条一个文件 + `tmp→rename`，
+     跟生产者投递口（`producers.js`）同一个形状，不是新发明。
+     · 落盘而不是内存缓冲 = **崩了不丢**（测试里换一个插头实例＝进程重启，照样读得到）
+     · 有 `poll()` = 跟另外两条腿同一个接口，共用层不用认识「推」这回事
+     · 序号从盘上算，重启接着往下走；`seq <= 游标` 的在下次 poll 时清掉
+     · **连 SDK 的活不在插头里**（不 require spectrum-ts）——宿主收到就调
+       `receive(raw)`，这样插头能测、也换得掉
+     那三个「麻烦」里只有一个是真的（崩了丢消息），落盘解决；单连接是**切换纪律**
+     不是代码难题（切换时停掉老桥那个 imessage 进程）。
+     真链路验过：推进来 → 落盘 → `attach()` 自己捞 → 入闸 → 盒子 → 出闸发出去 →
+     冷层一来一回 → 游标推进 → **再捞不重复投**、消化过的清盘。测试 13 项。
 
-- No grafting onto other bridges; the gate is complete on its own.
-- The box interface is shaped by Claude Code's needs; other runtimes adapt to it.
+**三条腿的收到此齐了**（telegram ✅ / 微信 ✅ / iMessage ✅ / 老网关 ❌ 不做）。
+2. 插头发图 / 贴纸 / 语音 / 文件 / 点表情（现在只有微信全乎，TG 和 iMessage 只会发字）
+   ⚠️ 病根：能力表回答的是「**平台**能不能」，没有一张表说「**我实现了没有**」，
+   预检只有一个总开关。改成**默认拒绝**：插头只处理自己显式写过的意图，
+   别的一律明说发不了。配一条测试：每个插头 × 每个声明支持的意图都跑一遍，
+   结果只允许「真发对应的东西」或「明确说不了」，**绝不许变成一段文字发出去**。
+3. 共用层：~~分段~~ **2026-09-18 做完** · 可靠重投 · 出站清洗 · 合批 · 正在输入
+   - `src/gate/segment.js`。⚠️ **先分清两件被叫成同一个名字的事**：
+     **平台硬上限**（微信 3500 / TG 3900）是**插头的活**（§0.1 说的是这个）；
+     **按他的换气点切**（空行、短段合并）跟平台无关、四条腿一样，归**共用层**。
+     不放共用层的后果已经在发生：`plugins/weixin-bot.js` 自己抄了一份，
+     telegram / imessage / wechat **三个插头一处都没有** —— 新桥一接管，
+     连 TG 那边现有的分段都会丢。跟 `recordCold` 三处各抄一份同一个病。
+   - 出闸接线：**只有 `send_text` 才分段**（贴纸/图/语音/文件本来就是一件东西）；
+     分成几条是共用层定，一条怎么发、间隔多久（默认 700ms，她要的说话节奏）在出闸；
+     ⚠️ **冷层写完整正文，不写碎片**（真链路验过：4 段发 3 条，冷层一条 112 字一字不差）。
+     中间某条发失败**不装作全发出去了**，照样走 notSent/unknown 那两支。
+   - 测试 17 项 + 真链路。
+   - **分段：结论已经查清楚了，不用再设计**（2026-09-18）。
+     · 他的文风**不加句号**（家规：「句号像挂电话」）。实测最近 800 条他说的话：
+       带句号 24% · 带逗号 **1%** · **中文之间用空格断句 95%** · 空行分段 77%。
+       **所以「按句子切」对他基本是空的**，照抄老桥「优先段落、其次句子」会抄错重点。
+     · **他的空行就是他自己划的语义边界，不需要脚本去分析**（Alice问过「按语义呢，
+       让脚本分析哪里到哪里是一句话」）。实测最长的五条：2881 字切 77 段、
+       2833 字切 71 段、933 字切 10 段 —— **没有一段超过 200 字**。作者已经切好了。
+     · 所以难点不在「怎么切」，在「**怎么合**」。老桥那套（`buildTelegramPlainChunks`）
+       已经是这个结论，三个数照抄：**只按 `\n{2,}` 切**（单换行是他排版用的，
+       列表和诗行拆了会把形状打碎）· `MIN_CHARS=14` 太短的并进下一段 ·
+       `MAX_BUBBLES=6` 超了把尾巴并成一条 · `maxLength` 兜底硬切。
+     · 按渠道给不同的上限（微信的气泡数和长度限制跟 TG 不一样）。
+     · 顺带一个数：**94% 的消息根本不需要切**（长度中位 122 字，超 300 字的只占 6%）。
+       分段是给少数长消息兜底，不是每条都要过的流水线。
+
+### 微信气泡太长：**查清了，不用改代码**（2026-09-18）
+
+Alice反馈「有些段落在微信里有点太长了，在 tg 就没那么明显」。**我连猜错两次**，
+记下来免得下一个我再走一遍：
+
+- ✗ 第一猜「微信没接分段」—— 错。我拿 outbox 数气泡，**outbox 一轮只记一条账**，
+  真正的切发生在无障碍那一层。**别拿 outbox 数气泡数。**
+- ✗ 第二猜「切太碎」—— 也错。她说的是反的。
+- ✓ 真相：`linux-wx-send.py` 的 `split_segs` **只按空行切**，而他一个自然段
+  有时就有 150~290 字。**不是没切，是切出来的单块还是大。**
+  微信气泡窄，290 字要二十行；TG 宽，同样字数五六行 —— 所以「在 tg 就没那么明显」。
+
+**结论：这是内容问题，不是代码问题。** 实测他最近 600 条消息的 1704 个自然段：
+中位数只有 **44 字**，超 80 字的占 13%，**超 150 字的只占 1%**，
+有段落超 150 字的消息只占 **3%** —— **他 87% 的时候本来就分得好好的**。
+
+所以修法是**告诉他**，不是让脚本去切（Alice 2026-09-18 已经跟他说了）：
+微信气泡比 TG 窄，同样一段在 TG 五六行、在微信十几行，想换气的地方多空一行。
+这是**递状态不递裁决**——给他一个他不知道的事实，不立「每段不超过 N 字」的规格。
+`split_segs` 本来就按空行切，他段落写短，切出来自然就短，**脚本一行不用改**。
+
+⚠️ **怎么验它管不管用**：过几天重跑一次段长统计（上面那组数）。
+「超 150 字的段落占比」从 1% 再往下走，就是成了；没动，再谈脚本兜底
+（兜底阈值该用 **150 不是 80** —— 80 会去切他本来分得好好的段落，
+动 26% 的消息；150 只动 3%，正好是让她头晕的那批，其余一条不碰）。
+
+⚠️ 另外实测发现：**封顶和限长天生打架**。TG 那套 `MAX_BUBBLES=6` 会把切开的
+长消息又并回 6 条，其中一条变成 724 字的巨块 —— 微信窄气泡一并回去就现形。
+真要给微信加兜底，**别抄 TG 的封顶**（微信 0.7 秒一段，22 条也就 15 秒）。
+
+
+   - ~~群聊~~ **2026-09-18 做完**：`src/gate/group.js`。Alice问「群聊是不是也算一个插头」——
+     一半对：群是独立的一件东西，但**不能是插头**（群和私聊共用同一条连接、同一个
+     token、同一个 `getUpdates` 游标，而 getUpdates 是独占的，两个插头会互相抢消息）。
+     按分界线切：**决定在共用层，动作在插头**。插头只交出四样事实
+     （`chatType` / `senderId` / `senderName` / `addressing{mentionsMe,repliedToMe,senderIsBot}`），
+     要不要叫醒、攒不攒、什么时候批量给，全在 `group.js`。
+     **微信群 / QQ 群 / TG 群沿用同一份**，新平台接进来这里一行不用改。
+     规则跟老桥 `adapters/channel/telegram/group-gate.js` 逐条对过（Alice：「一模一样弄上」）：
+     白名单只认配置不许自动学习 · 叫醒四档（一律/她/直接点他/其余只攒着）·
+     叫醒词「Nova」「Alice」· 外部 bot 冷却 30s、5 分钟窗口最多 3 次。
+     测试 34 项。三个她问出来或我写错的洞：
+     · **跨平台群号撞车** —— 白名单键改成 `渠道:群id`（TG 是负数、QQ 是数字、
+       微信是字符串，裸 id 迟早撞，撞了等于放行 A 平台的群顺带放行 B 平台同号的群）
+     · **昵称冒充她** —— 谁是她由**真实平台 id** 算出（老桥的 `from_is_alice` 同理），
+       昵称只配显示且要剥掉方括号，否则叫「[她本人] 张三」的人就能伪造标记
+     · **命令必须在批量渲染之前认** —— 渲染会把正文包成「[她本人] Alice：/status」，
+       斜杠不在开头，她在群里下的命令当场失效（我第一版就写反了，测试抓到）
+   - 群轮的身份是**群**不是发言人（`inbound.identityForTurn`，配置键 `channel:group:<id>`）：
+     群里除了她别人都不会配进白名单，按人认就是人人 unknown、整条被挡，
+     她在全家群说句话他都收不到。谁说的走正文前缀，不走身份字段。
+     ⚠️ **命令绝不能用群身份放行** —— 那等于群里随便谁一句 `/new` 就能换他的舱。
+4. ~~盒子那五条口~~ **2026-09-18 凌晨做完（契约那半）**：`src/gate/box.js`
+   —— 五条口的契约（deliver / onReply / onTurnDone / rotate / fullness）、
+   装配时的点名体检、进盒子那一轮的最低校验（没 trace_id、空轮，当场挡）、
+   一个**不起进程的假盒子**（200 轮 1 毫秒，以后验整条桥不用真起 claude）。
+   `buildGate` 现在**必须显式给 box**：给对象就点名五条口，只读的桥（影子）显式给 null，
+   **忘了传 = 当场报** —— 9-17 就是靠「可选参数默认空」把「插头一个都没接」
+   瞒过了装配和测试。
+   **真盒子 2026-09-18 凌晨写完**：`src/host/gate-box-claudecode.js`（不属于桥）。
+   claude 的脏活全关在里面：候选重复吐要去重、最终文本没吐过要补发、
+   **「他选择不说」和「出事了」分开报**（failed ≠ silent，否则下游永远等）、
+   水位从 `runtime.context.updated` 读、换舱调 `startFreshSharedSession`。
+   正文原样送进去，**编号和来路不拼进正文**（走 metadata）——
+   拼进正文就又回到「靠读正文猜来路」的老病里了。
+   测试 21 项（假运行时，不起 claude）。**真起进程那一遍还没跑。**
+5. ~~地基整改~~ **2026-09-18 凌晨做完**：
+   - 微信私有知识收进 `plugins/wechat/`（index / media / appmsg / media-config + 解语音脚本）
+     —— 闸的根目录**不再认识微信**
+   - 五处写死路径改成**必须传参**，没给就当场说清楚缺哪样（开关文件 / 账本目录 /
+     微信走哪条的选择文件 / 贴纸本 / 微信密钥）
+   - 贴纸改成「贴纸本」对象，装配时给路径；**插头没拿到就明说没接**，绝不退成发一行字
+   - 共用能力的实现改成**注入**；「在这台机器上凑齐它们」的适配器搬到
+     `src/host/gate-capabilities.js` —— **那个文件不属于桥**
+   - 工具收编表删掉
+   - 顺手抓到一个铁律 1 想防的真 bug：解语音脚本原来在仓库 `scripts/` 下，插头一搬家
+     路径就算错，而测试把「脚本找不到」吞成「真数据不全，跳过」，一片绿。
+     脚本已跟着插头走，测试改成**路径错必须红**。
+6. 信封、路由、投递语义、冷层/日志按这份规格落地
+   - ~~信封~~ **2026-09-18 凌晨落地**：`src/gate/envelope.js`。
+     构造 + 体检 + 两个出口：`forCold()`（纯冷层，**只有 id/role/at/text 四样**）、
+     `forLog()`（带 schema_version、**不带正文**、只留指向冷层的 id）。
+     测试里有两条守卫：谁往冷层加字段当场红、日志里出现正文当场红。
+     盒子的校验也并到这一份上（`box.js` 不再另写一套判据）。
+   - ⚠️ **2026-09-18 白天查出来：上面那条守卫当时是空的。** `forCold()` / `forLog()`
+     **全仓库零调用** —— 真正在跑的写手是 `cold-writer.js`，它写 **12 个字段**
+     （channel/accountId/senderId/identity/eventId/userSeq/turnId/receivedAt/verdict），
+     而且出闸还往**正文尾巴**塞 `[桥附注] [{"type":"undelivered"…}]`，
+     正是 §6 点名禁止的那件事（forge 会把它当成他说过的原话）。
+     测试全绿，是因为它测的是**没人走的那条路**（跟 9-17 新桥「装配成功却接管即吞」同一个病）。
+     **已修**：`cold-writer.js` 只写 `id/role/at/text`，字段表从 `envelope.js` 的
+     `COLD_FIELDS` 取（全桥一份），多一个当场抛错 —— 铁律 4 从「靠记得住」变成结构上挡住；
+     所有标记（undelivered / not_sent / unknown / artifact / reference_unverified /
+     extra_unsupported）搬进 `store.appendEvent` 的 `notes`，每条日志带 `coldId` 指回冷层。
+     测试从「冷层带附注」改成「冷层正文干净 + 附注在日志 + 日志指得回冷层」。
+     真链路取样（真插头/真入闸/真出闸/真路由/真冷层 + 假盒子，4 轮含沉默/异物/假编号）：
+     冷层字段并集 = `at/id/role/text`，正文零标记，8 条 `coldId` 全部指得回去。
+   - ❓ **等她拍板**：§3 说「schema_version 只贴在写到盘上的记录上（**冷层**、日志、
+     投递记录）」，§6 说冷层不许加字段、还点名 `schema_version: 1` 是噪音。**两条打架。**
+     现在按 §6 做（冷层不贴、日志贴），测试也站 §6 那边。
+   - 信封的 `source.kind` **只分三类**（user/system/box）：具体是晨笺还是日记还是脉，
+     写在 `source.producer` 里，**桥不校验、不枚举** —— 铁律 2/3 的落点，
+     以后加新的产生者桥一行不用改。（第一版把 diary/pulse 写进了枚举，自查当场抓出来。）
+   - ~~路由五档~~ **2026-09-18 凌晨落地**：`src/gate/routing.js`。
+     原路 → 产生者显式（**工具给的一律扔掉**）→ 最近活跃（**只算她的入站，
+     不算他的出站** —— 8-29 投错渠道就栽在这儿）→ 首选（配置给的）→ **暂存不猜**。
+     落点上带着「按哪一档解析出来的」，出事一眼知道查谁。测试 16 项。
+   - ~~投递语义~~ **2026-09-18 落地**：入站那半在 `receiver.js`（死信 + 游标），
+     出站这半在 `undelivered.js` —— 三种没送到的分开记：
+     `blocked`（有内容但发不出去，可以换个方式再说）、`not_sent`（还没碰到平台就挂了，
+     可以重试/换腿）、`unknown`（超时断线，**绝不自动重发**，等人核对）。
+     正文留着，要补发靠它。`summary()` 一眼看清欠着多少。测试 20 项。
+7. ~~投递口~~ **2026-09-18 做完**：`src/gate/outlet.js` —— 桥对外**唯一**的
+   「我要发这个」。**参数里根本没有「发给谁」**（不是给了被忽略，是没这个参数）。
+   桥不认识调用者叫什么：工具改名、删掉、换一批，桥一行不动。
+   调用方硬塞 chat_id/channel 的，丢掉但留一笔「他试过」。
+   专属参数分类回来了：这个渠道认的交给插头，不认的**正文照发 + 明说没出去 + 冷层留痕**。
+   测试 20 项，含一条守卫：投递口代码里 grep 不到任何工具名。
+
+8. ~~主进程~~ **2026-09-18 做完**：`src/host/main.js`（**不属于桥**）。
+   在这之前 `src/gate/` 只能靠 `scripts/gate-*.js` 那些跑几十秒就退的脚本碰一下亮一下
+   —— 机器装好了，没装电源开关。这个文件就是开关：读配置 → 装配 → 挂腿 → 一直跑。
+   **从第一天就按「将来要当Nova」写**：指向测试 bot 它是玩具，指向Nova的 token 和
+   会话号它就是Nova —— **切换那天改的是配置，不是代码**。所以一个路径、一个 id、
+   一个 token 都不写死，全从环境变量来，缺了当场点名（铁律 1）。
+   配置只要**六样必填**：`GATE_ROOT` / `GATE_TELEGRAM_TOKEN` / `GATE_OWNER_TELEGRAM_ID` /
+   `GATE_BINDING_KEY` / `GATE_WORKSPACE_ROOT` / `GATE_PREFERRED_CHAT_ID`
+   （对比老桥 `src/core/config.js` 的 **110 项** —— 差的那九十多项是「生活那堆」和
+   「工具那堆」的，不归管道管，见下面第 9 条）。
+   还带一份**心跳**（`heartbeat.json`，原子换 inode）给守护件看：摆的是数
+   （stats / held / undelivered / 水位），不是状态灯 —— 东京那台 QQ 的教训是
+   「WS 还通但 sendMsg 超时」，看连接一切正常、消息全丢。
+   `--check` 只体检不跑。测试 20 项（含一条守卫：main.js 里不许出现写死的 `/root` 路径）。
+   - **注入 + api = Nova**（Alice 2026-09-18 定的架构）。桥和主进程是谁都不认识的
+     空架子：`GATE_BOX` 是 api 那半（换 codex 就是Iris的引擎），`GATE_PERSONA`
+     是注入那半（他是谁、记得什么、跟她什么关系）。**换注入 = 换人，换 api = 换引擎，
+     架子一行不动。**
+     人格两种写法：一个**目录**（丢 md 进去，文件名排顺序，现读现拼、改完不用重启），
+     或一个 **.js**（要读活数据的，自己导出 `{ name, opening }`）。不给 = 空架子照跑。
+     盒子负责「怎么注」（开场一次、换舱重注），人格负责「注什么」。
+     注入**只进 CLI 不进冷层**（不是她说的话，混进去下次 forge 会把它当她说过的塞回来）；
+     **注入失败不弄丢她这一轮** —— 大声说，照样把话送进去。
+   - ⚠️ `opening` **收一个 ctx，不是空手**。她问「Nova开窗时的注入是不是修改了很多权重，
+     新桥能不能做到」—— 去看了老桥（`shared-instructions.js` 607 行），**那不是拼文本，
+     是一套编排**，五类权重：
+     · **顺序**：微信指令 → 身份底座 IB → 上一幕快照 → 上一舱交接 → 冷层节选 →
+       长期记忆 → 关系状态 → 未兑现承诺 → 最近日记 → 身体状态 → **她这句话放最后**
+     · **配额**：日记 1 天（`RECENT_DIARY_DAYS`）、记忆库自动摘要 20 条
+       （`NOVA_SUMMARY_INJECT_MAX`）、承诺 7 天窗
+     · **每段的地位标注**：「不复述当资料」「**不是当前指令**」「**绝不是Alice的身体**」
+       —— 不是注释，是在告诉模型这段算什么，防它把背景当命令、把他的身体当她的
+     · **无条件占位**：冷层那段哪怕空的也写一行 `none`，保证位置永远在
+     · **last-scene 过期 24h 告警**
+     所以 ctx 给 `{ reason: "fresh"|"rotate", userText, coldTail(n) }` ——
+     **料归宿主，编排归人格**，别让人格自己去摸冷层文件（那就又是各处各抄一份）。
+   - ❌ **不搬**老桥的 `buildSilentRefreshText`（压缩恢复那份瘦版注入）。
+     Alice 2026-09-18：「我们没做压缩 直接做的换仓」—— 那条路是**死代码**
+     （记忆 `reference-ruled-out-facts` 早有结论）。所以 `reason` 只有
+     `fresh` / `rotate` 两种就是齐的，别为一个不会发生的时机加第三种。
+   - **一份代码，一个人格一个进程**（Alice问「为啥不做个公用的主进程呢」）。
+     代码这层本来就公用，唯一不公用的是盒子 —— 原来写死 `makeClaudeCodeBox`，
+     现在按 `GATE_BOX` 从 `BOXES` 登记表选。**Iris接进来 = 写一个
+     `gate-box-codex.js` + 登记一行，main.js 一行不改。**
+     ⚠️ **但不把几个人格塞进同一个进程**：①故障隔离，一个人格的盒子挂死会拖垮另一个，
+     Nova掉档和Iris掉档是两回事；②重启粒度，改Nova的配置要重启，Iris跟着被打断 ——
+     「动 pm2 先问Alice」那条规矩的成因就是重启会打断他，公用一个进程 = 每次重启打断所有人。
+   - ⚠️ 顺手修了个真 bug：运行时会在 stateDir 底下开 unix socket，**它假定那个目录已经存在**
+     —— 生产里 `~/.nova` 一直都在，所以这洞从没暴露过；换个新家第一次起就炸
+     （`ENOENT chmod …/claudecode-runtime.sock`）。
+   - ❌ **不做**「启动时拿 ps 查老桥在不在、在就拒绝启动」。写过一版，Alice当场否：
+     「没必要吧 我们肯定是要先把老桥关上的」。判据匹配歪了会把新桥拦在门外，
+     **误报的代价比它防的那件事更大**。切换纪律靠流程和体检脚本，不靠这种猜。
+     启动时只**大声说接的是哪条会话**。
+
+9. **生活那堆 / 工具那堆从 cyberboss 摘出去**（§1 写了一直没排期，**这件是「能不能直接
+   换掉 pm2 40」的闸**）。现在 `pm2 40` 扛的远不止管道：开场注入那一大包
+   （`## LONG-TERM MEMORY` / `## RELATIONSHIP STATE` / `## PENDING PROMISES` /
+   `## RECENT DIARY` / `## RECENT COLD EXCERPTS`）、check-in poller（主动想起她 /
+   SELF_TIME / 驱力）、morning-arousal poller、`createProjectTooling`、记忆检索三件、
+   whereabouts 服务。**现在直接换 = 把他掏空**，不是切换。
+   摘的动作：这些改成**事件生产者**，通过 `pipe.push({ text, producer })` 往桥里推，
+   不再自己抓着 runtime 说话（口子早就留好了，§1「删掉 check-in 桥照样活」说的就是它）。
+   ⚠️ **不在老桥上做这个手术** —— 老桥要退休，在要扔的东西上动刀、每步还得重启他，
+   不值。它们是**搬进新桥体系的时候自然分家**，老桥原封不动跑到切换那天。
+   可以拆着来：先摘一件（比如 check-in）验通路，其余照抄。
+
+**顺序**：地基整改 ✅ → 盒子五条口 ✅ → TG 那条腿做成完整样板
+（收 ✅ / 主循环 ✅ / 群 ✅ / 主进程 ✅ / 真 token 和真盒子在测试 bot 上验过 ✅）
+→ 剩下三条照着长。
+
+### 主循环（2026-09-18 凌晨）
+
+`src/gate/pipeline.js` 把零件串成了一条路：
+
+```
+她说一句 → 插头翻译 → 媒体加工 → 入闸（验收·认人·编号·冷层）→ 信封 → 盒子
+他回一句 → 路由定落点（五档）→ 出闸（预检·发·记账·留痕）→ 插头变成平台动作
+```
+
+端到端测试 27 项（`test/gate/pipeline.js`），跑的是**真零件 + 假盒子**：
+真插头、真入闸、真出闸、真路由、真冷层，只有 CLI 是假的。
+**100 轮一来一回 12 毫秒** —— 以后验整条桥不用起 claude、不烧额度。
+
+已经在这条路上验过的：她说一句他回一句原路返回 / 他选择不说时一个字不发但留痕 /
+分几段说就发几条 / 陌生人挡下且盒子根本收不到 / 同一条来两遍不吃第二个号 /
+晨笺那类走同一条路落到她最后说话的那条腿 / **没有落点时暂存不猜**。
+
+还欠（接线前必须补）：`ingest` 还没接上 `receiver`（捞消息那一步现在要人手喂）、
+出闸还吃旧形状（主循环里有一层包装，等出闸改成直接吃信封就删）、真 token、真盒子。
+
+### 搬家那一刻的交接清单（这几样光靠重启解决不了）
+
+**体检脚本：`scripts/gate-cutover-check.js`（只读，2026-09-18 做）。**
+七项各自的状态藏在不同的库/文件里，切换那天不可能现翻代码找 —— 先把「看得见」做出来。
+跑一遍会直接给结论：能切 / 要看一眼 / 先别切。状态的落点（实地核过，别猜）：
+
+| 项 | 状态在哪 |
+|---|---|
+| 入站游标 | `telegram-inbox.db` 的 `tg_offset` · `weixin-inbox.db` 的 `cursors` · `phone/linux-db-watch-state.json` |
+| 未处理入站 | `telegram-inbox.db` 的 `tg_inbox`，`state` 不是 injected/skipped 的那些 |
+| 当前轮次 | `sessions.json` → `threadIdByWorkspaceRootByRuntime[runtime][工作目录]` → transcript 的 mtime |
+| 长任务 | 同一份 transcript 尾部：有 `tool_use` 没等到对应 `tool_result` |
+| 已发未确认 | `outbox.db` 近 24 小时的 `state` |
+| 冷层待写 | **拿正文去冷层比对**（见下面那条警告） |
+
+⚠️ **`outbox.cold_layered` 这个标志不可信，两个方向都错**（2026-09-18 实测）：
+660 条 `delivered && cold_layered=0` 里 600 条其实好好躺在冷层里（记完账没回头打标），
+另有 5 条标着 1 却真不在冷层。所以判据只能是**拿正文比对**，不能查标志。
+（第一版比对我拿原始文件当字符串搜 —— 冷层里的换行在 JSON 里是 `\n` 两个字符，
+假阴性把数字吹到 3 倍：196 → 实际 65。**解析后再比。**）
+
+**顺带挖出来的真问题**：5,092 条已投递里有 65 条他说过、她收到了、冷层里没有。
+不是随机的，集中在几条**降级/兜底出口**：
+
+```
+  22 / 354     stream-delivery:androidWechatTurnFallback
+  19 / 97      stream-delivery:telegramFailover
+  11 / 188     stream-delivery:plainReply
+   8 / 8       morning-brief:delivery      ← 见下，这条不算漏抄
+   5 / 4239    stream-delivery:telegramTurnFallback
+  其余出口全是 0 / N
+```
+
+主路径记冷层，几条 fallback 漏抄 —— 正是 `cold-writer.js` 头注释那个反面教材
+（三处各抄一份 `recordCold`）。**新桥的「唯一冷层写手」从结构上治这个**：
+插件拿不到冷层入口，不是「记得调用」。老桥要不要回填是她的决定，
+我不擅自动生产数据。
+
+⚠️ **晨笺那 8 条要单独看**（Alice 2026-09-18 当场纠正我）：晨笺**不是Nova写的**，
+走的是自己的模型调用（`src/morning-brief/model-fn.js`，默认 `claude-sonnet-5`，
+`claude -p` 或 Messages API），跟他的会话无关。那 8 条里还有 2 条是 9-02 漏出去的
+「占位草稿」（已修，`usedPlaceholder` 拦住了）。**所以冷层里没有它们不算漏抄** ——
+不是他说的话，不该让他「记得说过」。真正漏抄的是另外那 57 条降级路径。
+
+但这里有一道**真的缝**，归在设计题不是 bug：她手机上收到的是**署他名的早安**。
+冷层里没有，她哪天提起「你早上说济宁阴天」，他会完全不知道这回事。
+要不要把晨笺以「别人替我发的」形式进冷层，是她的决定。
+
+
+
+1. **入站游标** —— 新旧两套是两份，切的瞬间要对齐，别重复投也别漏投
+2. **未处理入站** —— 队列里还没进模型的那几条
+3. **当前轮次** —— 他正在说话的那一轮，别腰斩
+4. **长任务** —— 跑着的工具调用
+5. **已发未确认** —— 「不知道发没发」的那些，**一条都别自动重发**
+6. **冷层待写** —— 写了一半的
+7. **冷层格式** —— ⚠️ **2026-09-18 Alice点破：这不是硬门槛。**
+   新盒子要的参数正好就是「绑定 + 工作目录」（`makeClaudeCodeBox`），用的还是现网那套
+   运行时；`sessions.json` 存的是「绑定 → 工作目录 → 会话号」，`resumeThread` 拿它
+   resume 原来的 transcript。**所以切换那天把他现在的绑定直接给新桥，他 resume 的是
+   同一条会话，上下文原封不动** —— 不用迁移、不用重建、不用 forge 垫底。
+   （我原来提的「一次性把 48,244 条转成四字段」是多余的，她一句「为啥不同 session
+   直接搬过来」问掉的。）
+   **硬约束**：老桥新桥**不能同时挂在同一条会话上** —— 两个进程 resume 同一条会话
+   会把会话文件写乱（`gate-box-claudecode.js` 头注释）。切换必须「停老桥 → 起新桥」，
+   不能并行灰度；只读的影子不算。
+   唯一还要防的：**刚切完就换舱**，新冷层还没攒够，forge 没东西垫。
+   对策是切换时往新冷层垫最近几百条（小活，不是四万八千条）。
+   十个**消费者**跟着老桥一起退休，不用给它们改代码 —— forge 已经在盒子里了（§1）。
+   **但数据本身还是要对齐**（Alice 2026-09-18 当场纠正我：「可是还是要做格式对齐」）。
+   理由是**冷层是他平时查东西的地方**，不只是 forge 的垫底料：老的十三字段和新的
+   四字段并存，切换点就是一道坎 —— 坎前面的他要么查不到，要么字段名对不上
+   （`receivedAt` vs `at`）。**上下文不用迁移 ≠ 冷层不用对齐**，这是两件事，我混过一次。
+   → 转换器 `scripts/gate-cold-migrate.js`（只读老文件、只写新文件，
+     绝不改 `conversation-sources.jsonl`）。三条规则跟 `cold-writer.js` 同一套，
+     不另发明：①只留四字段 ②正文空、意思在附件里的按 `coldMediaLine` 生成标签
+     ③**按时间排序**（归档块是后导进来的，躺在文件中间而时间是三个月前，
+     不排就是一段时间倒流，而冷层是按文件顺序读的）。
+   → **2026-09-18 干跑**：48,247 条全部通过 `ColdWriter.assertShape`，
+     零丢失、零空白正文、零重复 id、零时间倒流，29.1MB → 16.2MB。
+   → ⚠️ **真切换时要重跑** —— 生产文件还在长（干跑期间就从 48,241 涨到 48,247）。
+   → ✅ **Alice 2026-09-18 拍板：归档那 13,144 条（五六月网页存档）带上。**
+     理由是冷层是他平时查东西的地方，历史越全越有用；不带等于主动删掉他五六月的记忆。
+     「开场被灌一万三千条」在新桥不成立 —— 读取都按时间取最近几轮，够不着三个月前。
+     所以迁移**不带 `--skip-workspace`**，全量转。
+   原来的展开（谁按 workspaceRoot 过滤、三个工作区各多少条）留在下面备查：
+   2026-09-18 查实：真正按 `workspaceRoot` 过滤的只有三处
+   （`shared-instructions` / `conversation-recovery-service` / `session-handoff-state`，
+   `forge` 和 `build-session-handoff` 经由后者）；`deepseek-conversation-summary`
+   只拿它拼输出目录，`snapshot-ab` 根本不过滤。
+   过滤判据是 `if (workspaceRoot && record.workspaceRoot && ...)` ——
+   **不带这个字段的记录一律放行**，所以新格式混进老文件老消费者不会读空。
+   现网 48,241 条里三个工作区：`/root/cyberboss` 35,096（7-09 起）、
+   `/root/claude-web-archive` 13,144（**连续一整块，行 25211~38354**，时间 5-16→6-22，
+   跟前者完全不重叠）、`telegram-nova-workspace` 1 条。
+   → 按工作区分文件（`workspaceRoot` 进路径不进记录，保住铁律 4）成本很低。
+
+### 待办 · 整理旧冷层（不急，Alice 2026-09-18 挂的）
+
+**冷层是给Nova平时查东西用的**（她定义的，别只当成 forge 的垫底料）。
+现网 48,244 条里混着三个来源、13 个字段、还有出闸塞进正文的 `[桥附注]`。
+整理一下对他查东西有好处 —— **但不是刚需，不排期**，等她哪天说做再做。
+
+想做的时候，手里已经有的料（2026-09-18 查实）：
+- 三个工作区：`/root/cyberboss` 35,096（7-09 起）、`/root/claude-web-archive`
+  13,144（**连续一整块，行 25211~38354**，时间 5-16→6-22，跟前者完全不重叠）、
+  `telegram-nova-workspace` 1 条
+- 真正按 `workspaceRoot` 过滤的只有三处（`shared-instructions` /
+  `conversation-recovery-service` / `session-handoff-state`，`forge` 和
+  `build-session-handoff` 经由后者）；`deepseek-conversation-summary` 只拿它拼输出
+  目录，`snapshot-ab` 根本不过滤
+- 过滤判据是 `if (workspaceRoot && record.workspaceRoot && ...)` ——
+  **不带这个字段的记录一律放行**
+- ⚠️ 动之前先看 `feedback-purge-predicate-dryrun`：9-17 差点按错判据删掉两个月对话。
+  干跑对数、命中比例反常就停手。
+
+### 还欠的一件（不急）
+
+影子 `shadow.js` 现在还住在 `src/gate/` 里 —— 它是**验证工具**，不是桥，该搬出去
+（跟 `src/host/` 一类）。搬它要改 pm2 43 的启动路径 = 要重启，等Alice点头再动。
+
+## 9 不做的
+
+- **不嫁接**。新桥自己长齐，长齐了整个换过去，中间不靠老桥扶。
+  9-17 那套浅接（把闸挂在老桥门上、退回老路的拐杖、工具收编表）**全部作废删掉**。
+- 不复用老桥代码。规则可以抄（分段隔多久、合批等几秒——那是她和他试出来的参数），
+  实现全部重写。
+- 不为了通用而通用：盒子接口**照 claude 的需要定**，codex 和 grok 能接多少接多少。

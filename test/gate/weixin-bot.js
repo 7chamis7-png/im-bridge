@@ -2,8 +2,10 @@
 /**
  * im.bot 网关做成插件。重点验「它跟真实微信是两个来源」和「分段归插件」。隔离跑。
  *
- * The local-client leg (identity = wxid) and the im.bot gateway (identity =
- * fromUserId, needs contextToken) are different sources, so they must stay separate.
+ * ⚠️ 2026-09-18 立意反了过来：原来这里验的是「两条技术路径共用一个渠道名」。
+ * Alice当天推翻：a11y 读的是她自己的微信客户端（身份 wxid、真人会话），
+ * 老网关是 im.bot 上的一个 bot 账号（身份 fromUserId、要 contextToken）——
+ * 「都是微信」不等于同一个来源。所以现在验的是**它俩分得开**。
  */
 const fs = require("fs");
 const os = require("os");
@@ -29,7 +31,7 @@ const vps = new WeChatPlugin({ sender: async () => "vps-1" });
 
 // 两个来源 -> 各自的身份键（同一个人，但认人的钥匙不是同一把）
 const inGate = new InboundGate({ store, cold,
-  identities: { "wechat:wxid_owner": "owner", "wechat-bot:wxid_owner_bot": "owner" } });
+  identities: { "wechat:Alice-wx": "alice", "wechat-bot:wxid_alice": "alice" } });
 const outGate = new OutboundGate({ store, cold, plugins: new Map([["wechat-bot", bot]]) });
 
 let pass = 0, fail = 0;
@@ -41,8 +43,8 @@ function check(name, got, want) {
 
 (async () => {
   console.log("\n[1] 真实微信 vs 微信 bot：两个来源，分得开");
-  const a = bot.toDelivery({ msgId: "m1", fromUserId: "wxid_owner_bot", content: "从 bot 网关来的", createTime: 1789600000 });
-  const b = vps.toDelivery({ local_id: 900, local_type: 1, create_time: 1789600100, sender: "wxid_owner", raw: Buffer.from("从 VPS 库来的", "utf8") });
+  const a = bot.toDelivery({ msgId: "m1", fromUserId: "wxid_alice", content: "从 bot 网关来的", createTime: 1789600000 });
+  const b = vps.toDelivery({ local_id: 900, local_type: 1, create_time: 1789600100, sender: "Alice-wx", raw: Buffer.from("从 VPS 库来的", "utf8") });
   check("bot 路 channel=wechat-bot", a.channel, "wechat-bot");
   check("真实微信那条还是 wechat", b.channel, "wechat");
   check("技术路径只进 transport", a.transport, "im.bot");
@@ -51,7 +53,7 @@ function check(name, got, want) {
   // 分开的是「谁说的、回哪去」，不是「第几句」。
   check("编号跨渠道仍是一条序列", [ra.event.userSeq, rb.event.userSeq], [1, 2]);
   const lines = fs.readFileSync(path.join(root, "cold.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-  // transport is a diagnostic field; the cold log only has id/role/at/text (SPEC §6).
+  // 2026-09-18：来源是技术字段，归日志；冷层只有 id/role/at/text（SPEC §6）。
   const log = fs.readFileSync(path.join(root, "events.jsonl"), "utf8")
     .trim().split("\n").map((l) => JSON.parse(l));
   const delivered = log.filter((e) => e.kind === "user_input.delivered");

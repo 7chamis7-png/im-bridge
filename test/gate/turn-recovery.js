@@ -71,7 +71,7 @@ test("ambiguous rejection is visible and cannot auto replay or start later task"
   assert.equal((await q.submit(env("a"), route("A"))).state, "unknown");
   await q.submit(env("b"), route("B")); await q.recover();
   assert.equal(attempts, 1); assert.equal(q.progress().unknown, 1);
-  // the watchdog must be able to say which turn is unknown and why, not just a count
+  // 守护要能直接说出是哪条、为什么不明（2026-09-20：只报个数害人找错账本）
   const p = q.progress();
   assert.equal(p.ledger, "turns.json");
   assert.equal(p.unknownRows.length, 1);
@@ -195,11 +195,11 @@ test("queued task events cannot execute before submission", async () => {
   assert.deepEqual(box.seen.map((e) => e.trace_id), ["a"]);
 });
 
-test("盒子重启后补发的事件没带 turnId：恰好一条在跑就归它", async () => {
+test("盒子重启后补发的事件没带 turnId：恰好一条在跑就归它（2026-09-20 17:39）", async () => {
   const box = controlled(); const { q, replies, done } = build(box);
   await q.submit(env("a"), route("A"));
   assert.equal(q.store.get("a").state, "accepted");
-  // box restarted: turn table lost, events come back with an empty turnId
+  // 盒子重启：轮次表丢了，事件带空 turnId 回来
   await box.emitReply({ turnId: "", threadId: "thread", text: "更正函发了" });
   box.emitDone({ turnId: "", threadId: "thread", silent: false });
   await tick(); await tick();
@@ -212,7 +212,7 @@ test("盒子重启后补发的事件没带 turnId：恰好一条在跑就归它"
 test("空 turnId 事件：在跑的不止一条就不猜", async () => {
   const box = controlled(); const { q, replies } = build(box);
   const store = new TurnStore({ file: file() });
-  // two unknown rows (typical after a restart), then start the queue on this ledger
+  // 造两条 unknown（重启后的常态），再在这份账本上起队列
   store.ensure(env("x"), route("X")); store.update("x", { state: "unknown", turnId: "t-x" });
   store.ensure(env("y"), route("Y")); store.update("y", { state: "unknown", turnId: "t-y" });
   const q2 = makeTurnQueue({ file: store.file, box, onReply: async (t, e) => replies.push(e), onDone: async () => {} });

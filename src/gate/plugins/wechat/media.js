@@ -1,21 +1,21 @@
 "use strict";
 
 /**
- * WeChat media decoding primitives.
+ * 微信媒体解码原语（2026-09-17 Alice「写进去」）
  *
- * SPEC §0.1: platform-specific decryption/decoding belongs to the plugin only.
- * WeChat 4.0 uses private formats for images and voice:
+ * §0.1：**平台特有的解密/解码全归插件，闸和共用层一个都不该懂。**
+ * 微信 4.0 的图片和语音是这里最脏的两块，都各有一套私有格式：
  *
- *   image .dat = V2 container: 15-byte header + AES-128-ECB(first 1024 bytes) + XOR(0x5f) rest
- *   voice      = media_0.db/VoiceInfo.voice_data, SILK v3 (header `\x02#!SILK_V3`)
+ *   图片 .dat  = V2 容器：15 字节头 + AES-128-ECB(前 1024 明文) + XOR(0x5f) 其余
+ *   语音       = media_0.db/VoiceInfo.voice_data，SILK v3（头 `\x02#!SILK_V3`）
  *
- *   - Image AES key = 16 ASCII chars used directly as AES-128 key. The plaintext
- *     md5 of `_h.dat` equals the md5 in the message XML, which identifies the image.
- *   - Voice: pilk decodes SILK -> PCM -> ffmpeg wraps WAV (wx-voice-decode.py).
+ * 两把钥匙都实测过（2026-09-17）：
+ *   - 图片 AES key = 16 个 ASCII 字符，直接当 AES-128 key；`_h.dat` 解出来
+ *     明文 md5 **正好等于消息 XML 里的 md5** —— 靠这条唯一对上是哪张图。
+ *   - 语音走 pilk 解 SILK -> PCM -> ffmpeg 封 WAV（同目录的 wx-voice-decode.py）。
  *
- * The "middle" `.dat` variant contains WeChat's own `wxgf` format (magic 77786766),
- * not a standard image; it is detected and converted separately, never passed
- * off as a viewable image.
+ * ⚠️ 中间版 `.dat`（微信默认下的那份）里面是微信自有的 `wxgf` 格式（头 77786766），
+ *    不是标准图片，本层不硬解 —— 嗅出来不是常见图片就明说，不冒充成能看的图。
  */
 
 const fs = require("fs");
@@ -27,13 +27,16 @@ const { promisify } = require("util");
 
 const execFileAsync = promisify(execFile);
 
-const DAT_SIG = Buffer.from([0x07, 0x08, 0x56, 0x32]);   // ...V2, first 4 of the 6 signature bytes
-const HEADER = 15;                                        // 6 signature + 4 aeslen + 4 xorlen + 1 pad
+const DAT_SIG = Buffer.from([0x07, 0x08, 0x56, 0x32]);   // ...V2，头 6 字节的前 4 字节
+const HEADER = 15;                                        // 6 签名 + 4 aeslen + 4 xorlen + 1 pad
 const XOR_KEY = 0x5f;
-// The decoder script ships next to this plugin and is resolved via __dirname.
+// 解码脚本跟插头放在一起（铁律 1：拷走能跑）。**这不是"写死路径"**——
+// 它是包内资源，用 __dirname 找同目录，换机器换目录都跟着走。
+// 2026-09-18 踩过：脚本原来在仓库的 scripts/ 下，插头一搬家路径就算错，
+// 而测试把"脚本找不到"吞成了「真数据不全，跳过」，一片绿。
 const DEFAULT_VOICE_DECODER = path.join(__dirname, "wx-voice-decode.py");
 
-/** Magic bytes of common image formats; distinguishes viewable images from private wrappers like wxgf. */
+/** 常见图片的 magic —— 用来判「解出来的到底是不是能看的图」，不是 wxgf 这种私有壳。 */
 function sniffImage(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 4) return "";
   if (buf[0] === 0xff && buf[1] === 0xd8 && buf[2] === 0xff) return "image/jpeg";
@@ -42,24 +45,24 @@ function sniffImage(buf) {
   if (buf[0] === 0x42 && buf[1] === 0x4d) return "image/bmp";
   if (buf.length >= 12 && buf.subarray(0, 4).toString("latin1") === "RIFF"
       && buf.subarray(8, 12).toString("latin1") === "WEBP") return "image/webp";
-  return "";      // wxgf (77786766) and other private formats: not a viewable image
+  return "";      // wxgf（77786766）等私有格式落这儿，返回空 = 不是能看的图
 }
 
-/** Is this a V2 image .dat container? */
+/** 这是不是一个 V2 图片 .dat 容器。 */
 function isDatV2(buf) {
   return Buffer.isBuffer(buf) && buf.length > HEADER && buf.subarray(0, 4).equals(DAT_SIG);
 }
 
 /**
- * Decrypt a V2 image .dat.
+ * 解一个 V2 图片 .dat。
  *
- * @param {Buffer} buf  whole .dat file bytes
- * @param {string|Buffer} key  image AES key (16 ASCII chars)
- * @returns {Buffer} plaintext bytes (jpeg/png/gif, or wxgf; the caller sniffs)
+ * @param {Buffer} buf  整个 .dat 文件字节
+ * @param {string|Buffer} key  图片 AES key（16 个 ASCII 字符）
+ * @returns {Buffer} 明文图片字节（可能是 jpeg/png/gif，也可能是 wxgf —— 由调用方嗅）
  *
- * Header: 6-byte signature | 4-byte aeslen (LE) | 4-byte xorlen (LE) | 1-byte pad.
- * Ciphertext length = file length - 15 - xorlen (deterministic, no padding guess).
- * First aeslen bytes are AES-128-ECB, the rest XOR 0x5f.
+ * 头：6 字节签名 | 4 字节 aeslen(LE) | 4 字节 xorlen(LE) | 1 字节 pad。
+ * 密文长度 = 文件长 - 15 - xorlen（确定式，不猜 padding 补几个块）。
+ * 前 aeslen 字节走 AES-128-ECB，其余每字节 XOR 0x5f。
  */
 function decryptDatV2(buf, key) {
   if (!isDatV2(buf)) throw new Error("不是 V2 图片 .dat（签名对不上）");
@@ -74,7 +77,7 @@ function decryptDatV2(buf, key) {
   }
 
   const decipher = crypto.createDecipheriv("aes-128-ecb", k, null);
-  decipher.setAutoPadding(false);       // WeChat pads whole blocks; truncate by aeslen ourselves
+  decipher.setAutoPadding(false);       // padding 是微信补的整块，自己按 aeslen 截，不让 node 校验
   const head = Buffer.concat([decipher.update(buf.subarray(HEADER, HEADER + ctLen)), decipher.final()])
     .subarray(0, aeslen);
 
@@ -84,28 +87,28 @@ function decryptDatV2(buf, key) {
   return Buffer.concat([head, tail]);
 }
 
-/** Extract md5 from (decompressed) image message XML. Returns "" if absent. */
+/** 从（已解压的）图片消息 XML 里挑 md5。挑不到返回空，不猜。 */
 function imgMd5FromXml(xml) {
   const m = /\bmd5="([0-9a-fA-F]{32})"/.exec(String(xml || ""));
   return m ? m[1].toLowerCase() : "";
 }
 
 /**
- * Locate and decrypt the `.dat` file for an image message.
+ * 定位并解出一条图片消息对应的 `_h.dat`（高清原图）。
  *
- * Layout: `<attachRoot>/<talkerMd5>/<YYYY-MM>/Img/<hash>_h.dat`, where talkerMd5 is
- * the Msg_ table name without the `Msg_` prefix. The file-name hash is not the XML md5.
+ * 目录规律（2026-09-17 实测）：`<attachRoot>/<talkerMd5>/<YYYY-MM>/Img/<hash>_h.dat`，
+ * 其中 talkerMd5 = 消息所在的 Msg_ 表名去掉 `Msg_` 前缀。
+ * **对上是哪张图靠明文 md5 == XML.md5**（文件名那个 hash 跟 XML md5 不是一回事）。
  *
- * Lookup order:
- *   1. `fileNameHint` (file name from hardlink.db by XML md5), WeChat's own index.
- *      A message may have `<base>.dat` (middle, wxgf), `<base>_h.dat` (HD, only
- *      after opening the full image) and `<base>_t.dat` (thumbnail).
- *      Prefer HD, then middle, then thumbnail.
- *   1b. `fileNameHints` time-window candidates (see below).
- *   2. Fallback without hints: scan `_h.dat` and match plaintext md5 == XML md5.
+ * 定位分两条路，优先第一条：
+ *   ① `fileNameHint`（从 hardlink.db 按 XML.md5 查到的文件名）—— 这是微信自己用的
+ *      正经索引，最可靠。同一条消息盘上有三份：`<base>.dat`（中间版 wxgf）、
+ *      `<base>_h.dat`（高清原图，点开大图才有）、`<base>_t.dat`（缩略图）。
+ *      **优先高清 `_h`，退中间版 `.dat`，再退缩略图 `_t`**（清晰度递减，但都比 [图片] 强）。
+ *   ② 没 hint 时兜底：扫 `_h.dat`，靠明文 md5==XML.md5 认（只对高清有效）。
  *
- * Returns decrypted container bytes as-is (standard image or wxgf); the caller
- * sniffs and converts wxgf -> jpg asynchronously.
+ * 解出来的字节可能是标准图（jpeg/png…），也可能是 wxgf（中间版）——**本函数不管翻译**，
+ * 原样把解密后的容器字节交出去，由调用方 sniff 再决定要不要 wxgf→jpg（那步是异步）。
  *
  * @returns {{bytes:Buffer, datPath:string, variant:string}|null}
  */
@@ -116,7 +119,7 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
   const ym = d.getUTCFullYear() + "-" + String(d.getUTCMonth() + 1).padStart(2, "0");
   const months = [ym, shiftMonth(ym, -1), shiftMonth(ym, 1)];
 
-  // try the three variants by quality; check adjacent months too
+  // 按 base 找三个变体，清晰度优先；三个月目录都看（跨月那几分钟）
   const tryBase = (hint) => {
     const base = String(hint).replace(/(_[ht])?\.dat$/i, "");
     for (const suffix of ["_h.dat", ".dat", "_t.dat"]) {
@@ -131,17 +134,18 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
     return null;
   };
 
-  // 1. hardlink gave a file name for the XML md5
+  // —— ① hardlink 按 XML.md5 给了文件名 ——
   if (fileNameHint) {
-    // hint present but file missing (not downloaded yet): report null, don't scan
+    // hint 给了却找不到文件（还没下下来）——不再瞎扫别的 md5，如实报空
     return tryBase(fileNameHint);
   }
 
-  // 1b. Time-window candidates for md5 mismatches. Images sent as "original"
-  // carry the original/HEVC md5 in the XML, while the client stores a re-encoded
-  // JPEG whose md5 (recorded in hardlink.db) never matches. Candidates are
-  // hardlink.db rows whose modify_time is near the message create_time (sorted
-  // by distance by the caller); accept the first that exists in this talker's dir.
+  // —— ①′ md5 对不上时的时间窗候选（2026-09-21）——
+  // 她按「原图」发的图，XML.md5 是原图 / HEVC 中间版的（XML 里带 hevc_mid_size），
+  // 客户端落盘的是转成 JPEG 的中间版，hardlink.db 记的是**转码后文件**的 md5，跟 XML 永远对不上。
+  // 9-20 19:37 那张就是：XML md5 15f8…，盘上 6e45….dat（md5 9230…），桥报「没下载」。
+  // 候选来自 hardlink.db 里 modify_time 落在消息 create_time 附近的行（调用方按时间差排好序），
+  // 这里只认**这个会话目录下真存在**的那个；一个都不在就继续往下走。
   const seen = new Set();
   for (const h of Array.isArray(fileNameHints) ? fileNameHints : []) {
     const base = String(h || "").replace(/(_[ht])?\.dat$/i, "");
@@ -151,7 +155,7 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
     if (hit) return { ...hit, matchedBy: "time" };
   }
 
-  // 2. no hint: only HD _h.dat plaintext md5 equals the XML md5
+  // —— ② 没 hint 的兜底：只有高清 _h.dat 的明文 md5 才等于 XML.md5 ——
   if (!md5 || !table) return null;
   for (const m of months) {
     const dir = path.join(attachRoot, talker, m, "Img");
@@ -172,45 +176,45 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
 
 const WXGF_MAGIC = Buffer.from("wxgf", "latin1");
 
-/** Is this (decrypted) buffer a WeChat wxgf still image (HEVC inside)? */
+/** 这段（已解密的）字节是不是微信自有的 wxgf 静图（里面包着 HEVC）。 */
 function isWxgf(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 4 && buf.subarray(0, 4).equals(WXGF_MAGIC);
 }
 
 /**
- * wxgf -> JPEG bytes.
+ * wxgf -> JPEG 字节。
  *
- * Structure: `wxgf` magic + a config header; from the first HEVC Annex-B start code
- * `00 00 00 01` on it is a standard H.265 stream (VPS/SPS/PPS/IDR) that ffmpeg decodes.
- * The config header (with an hvcC-style VPS copy) is discarded.
+ * 2026-09-17 逆出来的结构：`wxgf` magic + 一段配置头，**从第一个 HEVC Annex-B 起始码
+ * `00 00 00 01` 起就是标准 H.265 码流**（VPS/SPS/PPS/IDR 一整套），ffmpeg 直接解。
+ * 前面那段配置头（含一份 hvcC 风格的 VPS 副本）扔掉不用。
  *
- * @param {Buffer} wxgf  decrypted wxgf container bytes
- * @returns {Promise<Buffer>} JPEG bytes
+ * @param {Buffer} wxgf  解密后的 wxgf 容器字节
+ * @returns {Promise<Buffer>} JPEG 字节
  */
 async function decodeWxgf(wxgf, { ffmpeg = "ffmpeg", timeoutMs = 30000 } = {}) {
-  if (!isWxgf(wxgf)) throw new Error("not wxgf (magic mismatch)");
+  if (!isWxgf(wxgf)) throw new Error("不是 wxgf（magic 对不上）");
   const sc = wxgf.indexOf(Buffer.from([0x00, 0x00, 0x00, 0x01]));
-  if (sc < 0) throw new Error("no HEVC start code in wxgf");
+  if (sc < 0) throw new Error("wxgf 里找不到 HEVC 起始码");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wx-wxgf-"));
   const h265 = path.join(tmp, "in.h265");
   const jpg = path.join(tmp, "out.jpg");
   try {
     fs.writeFileSync(h265, wxgf.subarray(sc));
-    // -update 1: write a single image, not a sequence
+    // -update 1 明说只写一张图，避免 ffmpeg 当成序列
     execFileSync(ffmpeg, ["-y", "-hide_banner", "-v", "error", "-i", h265, "-frames:v", "1", "-update", "1", jpg],
       { timeout: timeoutMs, stdio: ["ignore", "ignore", "pipe"] });
     const out = fs.readFileSync(jpg);
-    if (!out.length || sniffImage(out) !== "image/jpeg") throw new Error("ffmpeg produced no JPEG");
+    if (!out.length || sniffImage(out) !== "image/jpeg") throw new Error("ffmpeg 没解出 JPEG");
     return out;
   } finally {
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* cleanup failure is not fatal */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 清不掉不拖垮主链 */ }
   }
 }
 
 /**
- * Build an "XML md5 -> file name on disk" lookup (injected into the plugin) backed
- * by hardlink.db, WeChat's own media index.
- * @returns {(md5:string)=>string} file name (e.g. `e363...dat`), or "" if not found
+ * 造一个「XML.md5 -> 盘上文件名」的查询函数（注入给插件），查的是 hardlink.db，
+ * 那是微信自己用来定位媒体文件的正经索引。
+ * @returns {(md5:string)=>string} 文件名（如 `e363...dat`），查不到返回 ""
  */
 function makeImageFileLookup({ hardlinkDb, key, sqlcipherBin = "sqlcipher" }) {
   return function imageFileLookup(md5) {
@@ -237,21 +241,21 @@ function shiftMonth(ym, delta) {
 
 const SILK_MAGIC = Buffer.from("#!SILK_V3", "latin1");
 
-/** Is this WeChat SILK v3 voice data (optionally with a leading 0x02 byte)? */
+/** 这段字节是不是微信 SILK v3 语音（可能带一个 0x02 前导字节）。 */
 function isWechatSilk(buf) {
   if (!Buffer.isBuffer(buf) || buf.length < 10) return false;
   return buf.subarray(0, 9).equals(SILK_MAGIC) || buf.subarray(1, 10).equals(SILK_MAGIC);
 }
 
 /**
- * WeChat SILK v3 voice -> WAV bytes via wx-voice-decode.py (pilk + ffmpeg).
- * pilk accepts WeChat's leading 0x02 byte as-is.
+ * 微信语音 SILK v3 -> WAV 字节。走同目录的 wx-voice-decode.py（pilk + ffmpeg）。
+ * pilk 直接吃微信那个 0x02 前导头，不用自己剥。
  *
- * @param {Buffer} silk  raw voice_data bytes
- * @returns {Promise<Buffer>} WAV bytes
+ * @param {Buffer} silk  voice_data 原始字节
+ * @returns {Promise<Buffer>} WAV 字节
  */
 async function decodeWechatSilk(silk, { decoder = DEFAULT_VOICE_DECODER, python = "python3", timeoutMs = 30000 } = {}) {
-  if (!isWechatSilk(silk)) throw new Error("not WeChat SILK v3 voice (header mismatch)");
+  if (!isWechatSilk(silk)) throw new Error("不是微信 SILK v3 语音（头对不上）");
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "wx-voice-"));
   const silkPath = path.join(tmp, "in.silk");
   const wavPath = path.join(tmp, "out.wav");
@@ -260,22 +264,22 @@ async function decodeWechatSilk(silk, { decoder = DEFAULT_VOICE_DECODER, python 
     await execFileAsync(python, [decoder, silkPath, wavPath], { timeout: timeoutMs, maxBuffer: 4 * 1024 * 1024 });
     return fs.readFileSync(wavPath);
   } finally {
-    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* cleanup failure is not fatal */ }
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 清不掉不拖垮主链 */ }
   }
 }
 
 /**
- * Build a lookup that fetches voice bytes from media_0.db by server_id (injected
- * into the plugin). The blob lives in media_0.db/VoiceInfo, keyed by server_id.
- * Uses sqlcipher's writefile to dump the BLOB to a temp file and read it back,
- * avoiding binary data on shell pipes.
+ * 造一个从 media_0.db 按 server_id 取语音字节的查询函数（注入给插件）。
+ * 语音 blob 不在主消息库，在 media_0.db/VoiceInfo，靠 server_id 对上（唯一）。
+ * 用 sqlcipher CLI 的 writefile 把 BLOB 落到临时文件再读回来 —— 不经 shell 管道、
+ * 不打印二进制（跟采集器同一套避坑：二进制走管道会被 xclip/编码搞坏）。
  *
  * @returns {(serverId:string|number)=>Buffer|null}
  */
 /**
- * Find candidate file names in hardlink.db by time (for locateImageDat's fileNameHints).
- * Only rows with modify_time within create_time ± windowSec, sorted nearest first.
- * Existence / talker membership is verified by locateImageDat.
+ * 按时间在 hardlink.db 里找候选文件名（配合 locateImageDat 的 fileNameHints）。
+ * 只查「modify_time 落在消息 create_time ± windowSec」的行，按时间差近→远排；
+ * 存不存在、是不是这个会话的，由 locateImageDat 在会话目录下验，这里不判。
  * @returns {(createTime:number)=>string[]}
  */
 function makeImageFilesByTime({ hardlinkDb, key, sqlcipherBin = "sqlcipher", windowSec = 120 }) {
@@ -311,7 +315,7 @@ function makeVoiceLookup({ mediaDb, key, sqlcipherBin = "sqlcipher" }) {
     } catch {
       return null;
     } finally {
-      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* same as above */ }
+      try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* 同上 */ }
     }
   };
 }

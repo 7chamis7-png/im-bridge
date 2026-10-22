@@ -54,15 +54,15 @@ test('tg_reply_to：只认数字编号（按钮点击那种编号回不了）', 
 });
 
 test('整条链路：包 → 真的桥工具口（unix socket）→ TG 腿 → sendMessage 参数', async () => {
-  const { makeToolSocket } = require('../../src/gate/tool-socket');
-  const { TelegramPlugin } = require('../../src/gate/plugins/telegram');
+  const { makeToolSocket } = require('/root/cyberboss/src/gate/tool-socket');
+  const { TelegramPlugin } = require('/root/cyberboss/src/gate/plugins/telegram');
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'tgpkg-'));
   const calls = [];
   const tg = new TelegramPlugin({ call: async (m, p) => { calls.push([m, p]); return { message_id: 1 }; } });
   const sock = makeToolSocket({ file: path.join(dir, 'tools.sock'),
     outbound: { deliver: async (turn) => { await tg.send({ operationId: 'o', chatId: turn.inboundEvent.chatId,
       text: turn.text, intent: turn.intent, extras: turn.extras, toolArgs: turn.toolArgs }); return { outcome: 'sent', channel: 'telegram' }; } },
-    binding: { lookup: () => ({ eventId: 'ev', channel: 'telegram', chatId: '10001' }) },
+    binding: { lookup: () => ({ eventId: 'ev', channel: 'telegram', chatId: '8613' }) },
     activeTurn: () => ({ threadId: 'th', turnId: 'tu' }) });
   await sock.start();
   try {
@@ -74,12 +74,12 @@ test('整条链路：包 → 真的桥工具口（unix socket）→ TG 腿 → s
     assert.equal(r2.text, '发出去了。');
     const sends = calls.filter(([m]) => m === 'sendMessage').map(([, p]) => p);
     assert.deepEqual(sends[0].reply_markup, { inline_keyboard: [[{ text: '火锅', callback_data: '火锅' }], [{ text: '烧烤', callback_data: '烧烤' }]] });
-    assert.equal(sends[0].chat_id, '10001');
+    assert.equal(sends[0].chat_id, '8613');
     assert.equal(sends[1].reply_to_message_id, 77);
   } finally { await sock.stop(); fs.rmSync(dir, { recursive: true, force: true }); }
 });
 
-test('stdio：agent 看到的名字是 tg_buttons / tg_reply_to', async () => {
+test('stdio：他看到的名字是 tg_buttons / tg_reply_to', async () => {
   const child = spawn(process.execPath, [path.join(__dirname, 'mcp-server.js')], { stdio: ['pipe', 'pipe', 'ignore'] });
   let buf = '';
   const got = new Promise((resolve) => child.stdout.on('data', (c) => {

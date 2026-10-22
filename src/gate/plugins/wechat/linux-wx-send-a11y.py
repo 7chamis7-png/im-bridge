@@ -1,26 +1,18 @@
 #!/usr/bin/env python3
-"""Linux WeChat outbound via accessibility (AT-SPI): no screenshots, no OCR.
+"""Linux 微信出站（无障碍版）：靠 AT-SPI 认界面，不截图、不 OCR。
 
-With libatk-adaptor installed, WeChat exposes its widget tree on the AT-SPI bus,
-so the chat title, chat list and input box can be found by name with exact
-coordinates:
-  "am I in the target chat?"  -> check the top label
-  "where is the input box?"   -> find the role=text node
-  "was it sent?"              -> the Send button becomes disabled again
-Every wait polls until the condition holds instead of sleeping fixed times.
+2026-09-17 Keeper写。老的 linux-wx-send.py 原样留着当回退，phone reply 先试这个。
 
-Notes:
-- AT-SPI can read but not click (button actions only offer SetFocus); clicks use xdotool.
-- AT-SPI coordinates differ from X screen coordinates by the window decoration
-  offset, so everything is converted to frame-relative coordinates and clicked
-  with `xdotool mousemove --window`.
+为什么能这么写：装了 libatk-adaptor 之后微信会把整棵控件树报到 AT-SPI 总线上，
+会话标题、会话列表、输入框都能按名字查到，还带精确坐标。于是：
+  「我在不在她的会话里」→ 查顶部 label，不用 OCR 认字
+  「输入框在哪」        → 查 role=text 的节点，不用按窗口比例猜
+  「发出去了没」        → 查输入框内容变空，不用找绿色发送键
+所有等待都改成**轮询到状态成立为止**，不再 sleep 死时间。
 
-WARNING: UI automation of the WeChat client may trigger account restrictions.
-Use at your own risk.
-
-Environment:
-  LINUX_WX_TARGET   title of the target chat (required)
-  LINUX_WX_DISPLAY  X display (default :0)
+⚠️ AT-SPI 只能读不能点（按钮的 action 只有 SetFocus），点击仍走 xdotool。
+⚠️ AT-SPI 坐标和 X 屏幕坐标差一个窗口装饰的偏移，所以一律换算成
+   「相对 frame 原点」再用 xdotool mousemove --window 点，这个实测准。
 """
 from __future__ import annotations
 
@@ -31,18 +23,22 @@ import subprocess
 import sys
 import time
 
-DISPLAY = os.environ.get("LINUX_WX_DISPLAY", ":0")
+DISPLAY = os.environ.get("LINUX_WX_DISPLAY", ":98")
 os.environ.setdefault("DISPLAY", DISPLAY)
 os.environ.setdefault("XDG_RUNTIME_DIR", f"/run/user/{os.getuid()}")
 os.environ.setdefault("DBUS_SESSION_BUS_ADDRESS", f"unix:path={os.environ['XDG_RUNTIME_DIR']}/bus")
 ENV = dict(os.environ)
 
+# 2026-09-17：默认值一个字没动。加环境变量只是为了拿「文件传输助手」当靶子
+# 做出站验证时不用改代码——生产任何一条路都不设这个变量，行为完全照旧。
+# 2026-10-21：不再给默认窗口标题（原来写死的是她的微信名）。桥那头（a11y-send.js）一直带着
+# LINUX_WX_TARGET=$GATE_WECHAT_TARGET，所以生产行为不变；没给就拒发，绝不拿空串去匹配「任何一行」。
 TARGET = os.environ.get("LINUX_WX_TARGET", "")
-# The chat title sits above this y; names further down are chat content, not the title
+# 顶部标题在这个高度以内；再往下就是聊天记录里的名字，不能当判据
 TITLE_MAX_Y = 100
-DEADLINE_ENTER = 3.0      # wait to enter the target chat
-DEADLINE_FILLED = 2.0     # wait for text to land in the input box
-DEADLINE_SENT = 4.0       # wait for the Send button to disable (= sent)
+DEADLINE_ENTER = 3.0      # 等进入她的会话
+DEADLINE_FILLED = 2.0     # 等文字落进输入框
+DEADLINE_SENT = 4.0       # 等输入框清空（= 发出去了）
 TICK = 0.05
 
 
@@ -61,7 +57,7 @@ def _atspi():
 
 
 def frame_node():
-    """WeChat's top-level frame. Raises if unavailable."""
+    """微信顶层 frame。拿不到就抛，调用方回退到截图版。"""
     pyatspi = _atspi()
     desktop = pyatspi.Registry.getDesktop(0)
     for i in range(desktop.childCount):
@@ -72,11 +68,11 @@ def frame_node():
             f = app.getChildAtIndex(j)
             if f is not None and f.getRoleName() == "frame":
                 return f
-    raise RuntimeError("WeChat is not on the accessibility bus (was it started with accessibility enabled?)")
+    raise RuntimeError("微信不在无障碍总线上（微信是不是没用 start-wechat.sh 起的？）")
 
 
 def scan(f):
-    """Walk visible nodes; returns [(role, name, relx, rely, w, h, node)] relative to the frame origin."""
+    """遍历可见节点，返回 [(role, name, relx, rely, w, h, node)]，坐标相对 frame 原点。"""
     pyatspi = _atspi()
     fx, fy = tuple(f.queryComponent().getExtents(pyatspi.DESKTOP_COORDS))[:2]
     out = []
@@ -101,7 +97,7 @@ def scan(f):
 
 
 def in_target_chat(nodes) -> bool:
-    """Top title matches TARGET = the target chat is open."""
+    """顶部标题是她 = 当前就在她的会话里。"""
     for role, name, x, y, w, h, _ in nodes:
         if role == "label" and y < TITLE_MAX_Y and name.strip().startswith(TARGET):
             return True
@@ -109,7 +105,7 @@ def in_target_chat(nodes) -> bool:
 
 
 def input_box(nodes):
-    """Input box: role=text named after the peer (the search box is also text; the name disambiguates)."""
+    """输入框：role=text 且名字是对方。搜索框也是 text，靠名字区分。"""
     for role, name, x, y, w, h, node in nodes:
         if role == "text" and name.strip().startswith(TARGET):
             return (x + w // 2, y + h // 2, node)
@@ -117,7 +113,7 @@ def input_box(nodes):
 
 
 def session_item(nodes):
-    """The target's row in the chat list."""
+    """会话列表里她那一行。"""
     for role, name, x, y, w, h, _ in nodes:
         if role == "list item" and name.strip().startswith(TARGET):
             return (x + w // 2, y + h // 2)
@@ -125,8 +121,8 @@ def session_item(nodes):
 
 
 def box_text(node) -> str:
-    """WeChat's input node does NOT report its content (always empty).
-    Debug only; never use it to check whether text is present."""
+    """⚠️ 微信的输入框节点**不报告内容**，读出来永远是空。
+    留着只为调试，别拿它当"有没有字"的判据——2026-09-17 就是栽在这上面。"""
     try:
         return node.queryText().getText(0, 4096)
     except Exception:
@@ -134,17 +130,19 @@ def box_text(node) -> str:
 
 
 def send_button(nodes):
-    """Send button: disabled when empty, enabled with content, disabled again after sending.
-    This is the reliable signal."""
+    """发送键：没字时 ENABLED=False，有字变 True，发出去又变回 False。
+    这是真正靠谱的判据（实测），替掉了"读输入框内容"和"找绿色像素"。"""
     for role, name, x, y, w, h, node in nodes:
-        if role == "button" and name.strip() == "Send":
+        # ⚠️ 角色名跟微信版本有关：4.1.13.9 报 "button"，4.1.13.23 报 "push button"。
+        # 2026-10-20 搬德国机换到 .23 后这里就永远匹配不上，出站全挂在"没有发送键"。
+        if role in ("button", "push button") and name.strip() == "Send":
             return (x + w // 2, y + h // 2, node)
     return None
 
 
 def node_enabled(node) -> bool:
-    """Check a single node's state. When polling, avoid walking the whole tree
-    (~0.4s per walk vs. milliseconds for one node)."""
+    """只查这一个节点的状态。轮询时别再遍历整棵树——遍历一次 0.4 秒，
+    查一个节点 0.00x 秒，差出来的就是她能感觉到的那几秒。"""
     import pyatspi
     try:
         return node.getState().contains(pyatspi.STATE_ENABLED)
@@ -153,13 +151,13 @@ def node_enabled(node) -> bool:
 
 
 def send_ready(f) -> bool:
-    """Something to send = Send button enabled. (Use node_enabled when polling.)"""
+    """输入框里有东西可发 = 发送键亮着。（要反复问的话用 node_enabled）"""
     btn = send_button(scan(f))
     return bool(btn) and node_enabled(btn[2])
 
 
 def wait_for(fn, deadline: float):
-    """Poll until the condition holds; returns the last result."""
+    """轮询到条件成立，返回最后一次结果。不再 sleep 死时间。"""
     end = time.time() + deadline
     val = None
     while time.time() < end:
@@ -170,13 +168,13 @@ def wait_for(fn, deadline: float):
     return val
 
 
-# ── X operations ───────────────────────────────────────────────────────────────
+# ── X 操作 ────────────────────────────────────────────────────────────────
 
 def weixin_wid() -> str:
     r = run(["xdotool", "search", "--name", "^Weixin$"], capture_output=True, text=True, check=False)
     wids = [ln.strip() for ln in r.stdout.splitlines() if ln.strip()]
     if not wids:
-        raise RuntimeError("Linux WeChat window not found")
+        raise RuntimeError("Linux 微信窗口不在")
     return wids[-1]
 
 
@@ -186,7 +184,7 @@ def activate(wid: str) -> None:
 
 
 def click_rel(wid: str, x: int, y: int) -> None:
-    """Click at window-relative coordinates, avoiding the decoration offset."""
+    """按「相对窗口」坐标点击，绕开窗口装饰造成的偏移。"""
     run(["xdotool", "mousemove", "--window", wid, str(x), str(y)], check=False)
     run(["xdotool", "click", "1"], check=False)
 
@@ -200,8 +198,10 @@ def set_clipboard(text: str) -> None:
 
 
 def png_for(path: str) -> str:
-    """WeChat's clipboard paste only accepts bitmaps; convert webp/others to PNG
-    in the temp dir. Animated images are not handled (first frame only).
+    """微信剪贴板只认位图。webp/其它一律先转成 PNG，转出来的放临时目录。
+
+    2026-09-17：贴纸源图是 512x512 静态 webp（`/root/sticker-build/pack-*/`），
+    实测 11 张全是单帧，所以只转 PNG 不做 GIF。哪天有动图再说。
     """
     if path.lower().endswith(".png"):
         return path
@@ -211,10 +211,10 @@ def png_for(path: str) -> str:
 
 
 def set_clipboard_image(png_path: str) -> None:
-    """Put an image on the clipboard.
+    """把图片放进剪贴板。
 
-    xclip forks into the background to hold the selection; don't capture stdout
-    or the parent will hang.
+    ⚠️ 跟 set_clipboard 同一个坑：xclip 读完会 fork 到后台占住选区。
+    这里让它自己 fork（不捕获 stdout），父进程立刻返回 —— 捕获 stdout 会挂死。
     """
     subprocess.run(
         ["xclip", "-selection", "clipboard", "-t", "image/png", "-i", png_path],
@@ -228,7 +228,7 @@ def key(wid: str, *keys: str) -> None:
         run(["xdotool", "key", "--window", wid, "--clearmodifiers", k], check=False)
 
 
-# ── sending ─────────────────────────────────────────────────────────────────
+# ── 发送 ──────────────────────────────────────────────────────────────────
 
 def split_segs(text: str) -> list[str]:
     segs = [s.strip() for s in re.split(r"\n\s*\n+", text) if s.strip()]
@@ -236,17 +236,17 @@ def split_segs(text: str) -> list[str]:
 
 
 def ensure_in_chat(wid: str, f) -> list:
-    """Make sure the target chat is open; no-op if it already is."""
+    """保证光标在她的会话里。已经在就直接返回，不做无谓动作。"""
     nodes = scan(f)
     if in_target_chat(nodes):
         return nodes
     item = session_item(nodes)
     if not item:
-        raise RuntimeError(f"{TARGET} not found in the chat list; refusing to send blindly")
+        raise RuntimeError(f"会话列表里没找到 {TARGET}，没敢盲发")
     click_rel(wid, item[0], item[1])
     nodes = wait_for(lambda: (lambda ns: ns if in_target_chat(ns) else None)(scan(f)), DEADLINE_ENTER)
     if not nodes or not in_target_chat(nodes):
-        raise RuntimeError(f"clicked {TARGET} but the title did not change; refusing to send blindly")
+        raise RuntimeError(f"点了 {TARGET} 那一行但标题没变过来，没敢盲发")
     return nodes
 
 
@@ -265,15 +265,16 @@ def send_one(wid: str, f, text: str) -> None:
     set_clipboard(text)
     key(wid, "ctrl+a", "BackSpace", "ctrl+v")
 
-    # wait for the text to land: watch the Send button, not a timer
+    # 等文字真落进输入框：看发送键亮没亮，不猜时间、也不读输入框
     if not wait_for(lambda: node_enabled(send_node), DEADLINE_FILLED):
         raise RuntimeError("粘贴后发送键没亮，字没进去，没发")
 
-    # Send with Enter rather than clicking: the Send button is small enough that the
-    # decoration offset can make clicks miss.
+    # 用回车发，不点发送键。
+    # 2026-09-17 实测：发送键只有 53×27，无障碍坐标和 X 坐标之间那点装饰偏移
+    # 就足够点空；同样的偏移点 168×36 的登录键却没事。小控件一律别点。
     key(wid, "Return")
 
-    # Send button disabled again = WeChat accepted and sent it
+    # 发送键重新变灰 = 微信收下并发出去了
     if not wait_for(lambda: not node_enabled(send_node), DEADLINE_SENT):
         raise RuntimeError("发送键还亮着，字卡在输入框里没发出去")
 
@@ -288,9 +289,9 @@ def available() -> bool:
 
 
 def send_image(wid: str, f, image_path: str) -> None:
-    """Send an image. Same signal as text: Enter once Send is enabled, done once it disables."""
+    """发一张图。判据跟发字一模一样：发送键亮了才回车，变灰了才算发出去。"""
     if not os.path.isfile(image_path):
-        raise RuntimeError(f"image not found: {image_path}")
+        raise RuntimeError(f"图不存在: {image_path}")
     png = png_for(image_path)
     nodes = ensure_in_chat(wid, f)
     box = input_box(nodes)
@@ -315,22 +316,22 @@ def send_image(wid: str, f, image_path: str) -> None:
 
 
 def main() -> int:
-    if not TARGET:
-        print("LINUX_WX_TARGET is not set", file=sys.stderr)
-        return 2
     if len(sys.argv) < 2:
-        print("usage: linux-wx-send-a11y.py [--check | --image <path>] <text>", file=sys.stderr)
+        print("用法: linux-wx-send-a11y.py [--check | --image <路径>] <文本>", file=sys.stderr)
         return 2
     if sys.argv[1] == "--check":
         return 0 if available() else 1
+    if not TARGET.strip():
+        print("没给 LINUX_WX_TARGET（发给哪个聊天窗），没敢盲发", file=sys.stderr)
+        return 2
     if sys.argv[1] == "--image":
         if len(sys.argv) < 3:
-            print("usage: linux-wx-send-a11y.py --image <image path>", file=sys.stderr)
+            print("用法: linux-wx-send-a11y.py --image <图片路径>", file=sys.stderr)
             return 2
         t0 = time.time()
         wid = weixin_wid()
         send_image(wid, frame_node(), sys.argv[2])
-        print(f"linux-wechat(a11y) sent 1 image in {time.time() - t0:.2f}s")
+        print(f"linux-wechat(a11y) 发图 1 张，{time.time() - t0:.2f}s")
         return 0
     text = sys.argv[1]
     if not text.strip():
@@ -344,7 +345,7 @@ def main() -> int:
     segs = split_segs(text)
     for i, seg in enumerate(segs):
         send_one(wid, f, seg)
-    print(f"linux-wechat(a11y) sent {len(segs)} segment(s) in {time.time() - t0:.2f}s")
+    print(f"linux-wechat(a11y) 发了 {len(segs)} 段，{time.time() - t0:.2f}s")
     return 0
 
 

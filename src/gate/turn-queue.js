@@ -19,8 +19,8 @@ function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = (
     if (binding && row.route.ok) binding.bind(row.threadId, row.turnId, {
       eventId: row.id, channel: row.route.target.platform, chatId: row.route.target.chat_id,
       accountId: "",
-      // Platform-native id of the owner's message (Telegram message_id / WeChat row id),
-      // carried through so reactions know which message to target.
+      // 她那条在平台上的号（TG 的 message_id / 微信的行号）。2026-09-20 加：
+      // 点表情要知道点哪一条，而这个号一路从入站带到这儿，以前到这就断了。
       nativeId: (row.envelope && row.envelope.source && row.envelope.source.native_id) || "",
     });
     return row;
@@ -42,11 +42,10 @@ function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = (
       const row = store.get(active.id);
       if (!row.turnId || row.turnId === event.turnId) return bind(row, event);
     }
-    // If the box restarts after a turn was accepted, the CLI (in im-cli) still finishes
-    // it, but events replayed to the new box carry no turnId (the turn table lived in
-    // the old process). The runtime is strictly serial, so at most one turn can be
-    // "submitted, no verdict yet"; when there is exactly one, it owns the event.
-    // With two or more we don't guess. Without this the whole reply would be lost.
+    // 2026-09-20 17:39 踩过：盒子在一轮被接收之后重启，CLI（在 nova-cli 里）照常把那轮跑完，
+    // 新盒子补发回来的事件**带不出 turnId**（轮次表在旧进程里）。运行时严格串行，桥这头
+    // 「提交了还没结论」的最多只有一条 —— 恰好一条时它就是主人。有事件 = 证明跑过，
+    // 属于「只认能证明已经跑完的那一半」；两条以上照旧不猜。少了这一步她少收他一整段话。
     if (!event.turnId) {
       const inflight = store.list().filter((r) => ["accepted", "unknown"].includes(r.state));
       if (inflight.length === 1) {
@@ -111,14 +110,12 @@ function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = (
   });
 
   /**
-   * After a restart every "submitted, no receipt" turn is unknown, and pump() starts
-   * no new turn while any unknown exists - without this the bridge would stall after
-   * every restart until someone reconciled by hand.
+   * 重启之后，所有「提交过但没等到回执」的轮次都是 unknown，而 pump 见到任何一条
+   * unknown 就不再开新轮 —— 没有这一步的话，桥每重启一次就停摆到有人手工核对为止。
    *
-   * Only the provable half is settled automatically: if the host's reconciler can
-   * show evidence (e.g. the outbound ledger shows this turn was delivered), the turn
-   * is marked completed. "Proven not run" is never auto-decided - getting that
-   * wrong means duplicate delivery, which costs more than waiting for a human.
+   * 这里只认**能证明已经跑完**的那一半：宿主给的 reconciler 拿得出平台回执
+   * （比如出站账本里这一轮确实发出去过），就认它完成。证明不了就原样留着等人。
+   * 「证明没跑」永远不自动判 —— 那一侧判错就是重复投递，代价比等人高。
    */
   async function autoReconcile() {
     if (!reconciler) return [];
@@ -189,8 +186,8 @@ function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = (
       const pending = store.list().filter((r) => ["queued", "submitting", "accepted"].includes(r.state))
         .sort((a, b) => String(a.queuedAt || "").localeCompare(String(b.queuedAt || "")));
       const unknownRows = store.list().filter((r) => r.state === "unknown");
-      // Include who/what/why for unknown turns so an alert points straight at the
-      // entry to reconcile (ledger = the bridge's turns.json).
+      // 2026-09-20：守护只报「有 1 条不明」害我们找了 40 分钟找错账本。把那条是谁、说了啥、
+      // 为什么不明一起带出去，看一眼报警就知道该去哪儿核对（账本 = 桥的 turns.json）。
       const brief = (r) => {
         const env = r.envelope || {}; const src = env.source || {}; const pl = env.payload || {};
         const text = String(pl.text || "").trim();

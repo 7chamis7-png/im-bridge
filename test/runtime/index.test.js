@@ -69,7 +69,7 @@ test('E2E：真 SDK → 假 CLI stdin → decode → claim → deliver → resul
   const h = harness(t, { initOnUser: true, turns: [[first, result()], [assistant('第二条'), result()]] });
   const runtime = h.open();
   const source = { ...origin };
-  const input = message('caller persona block\nowner message');
+  const input = message('调用方人格包\n她的原话');
   const a = runtime.enqueue({ message: input, origin: source });
   const b = runtime.enqueue({ message: message('第二轮'), origin: { ...origin, threadId: 'queued-thread' } });
   source.threadId = 'changed';
@@ -85,7 +85,7 @@ test('E2E：真 SDK → 假 CLI stdin → decode → claim → deliver → resul
   assert.equal(received.length, 2);
   for (const item of received) seenStates.push(item.rows.find((r) => r.uuid === item.message.uuid).state);
   assert.deepEqual(seenStates, ['started', 'started']);
-  assert.equal(received[0].message.message.content, 'caller persona block\nowner message');
+  assert.equal(received[0].message.message.content, '调用方人格包\n她的原话');
   assert.deepEqual(received[0].message.origin, { kind: 'channel', server: 'telegram' });
   assert.equal(received[1].rows.find((r) => r.uuid === a.uuid).state, 'completed');
   assert.equal(runtime.status().requestedModel, 'requested[1m]');
@@ -187,10 +187,9 @@ test('E2E：恢复 pending 实际重放一次，started 恢复 uncertain 不重�
   assert.equal(h.deliveries[0].bindings[0].uuid, b);
 });
 
-// Stopping the process on a missing/unknown UUID is wrong against the real CLI: assistant
-// frames after a tool call carry no stamp (test/fixtures/sdk-tool-turn.jsonl). With strict
-// serial execution an unstamped frame can only belong to the single started row; a failed
-// delivery still must not be reported as completed.
+// 2026-09-20 改：原规则「缺/未知 UUID 一律停进程」对着真 CLI 是错的 ——
+// 工具调用之后的 assistant 帧本来就不带戳（fixtures/sdk-tool-turn.jsonl）。
+// 串行下没戳的帧只可能属于唯一那条 started；投递失败仍然不许假完成。
 test('E2E：缺失/未知 UUID 归给唯一在跑的那轮；投递失败也不假完成', { timeout: 6000 }, async (t) => {
   for (const kind of ['missing', 'unknown']) await t.test(kind, async (t) => {
     const frame = assistant();

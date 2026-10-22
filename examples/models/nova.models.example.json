@@ -1,0 +1,17 @@
+{
+  "_说明": "Nova的模型登记表 —— 上线放到 /root/.nova-gate/models.json（或 GATE_MODELS_FILE 指的地方）。/model 的按钮 = 当前引擎下的条目（同一家热切），/engine 的按钮 = 别的引擎的条目（跨厂商 = 一次正规换舱）。查不到就拒绝。按量计费的要 requiresAllow 那个 env 开着才放行。2026-10-21 只登记现在在用的和最近用过的。",
+  "v": 1,
+  "default": "claude-fable-5[1m]",
+  "models": [
+    { "id": "claude-fable-5[1m]", "label": "Fable 5", "engine": "claude-cli",
+      "window": 1000000, "vision": true, "tools": true, "reasoningOpaque": "claude", "billing": "subscription",
+      "note": "他现在在用的（sessions.json 10-21）。9-03 Alice：留 Fable 5，不要 5.1。窗口 = [1m] 后缀，跟 GATE_BOX_CONTEXT_LIMIT=1000000 一致" },
+    { "id": "claude-opus-5-5[1m]", "label": "Opus 5.5", "engine": "claude-cli",
+      "window": 1000000, "vision": true, "tools": true, "reasoningOpaque": "claude", "billing": "subscription",
+      "note": "最近用过（nova-box 日志 555 轮）" },
+    { "id": "deepseek-chat", "label": "DeepSeek（按量）", "engine": "openai-chat",
+      "window": 128000, "vision": false, "tools": true, "billing": "api", "requiresAllow": "DEEPSEEK_ALLOW_BILLING",
+      "secret": "deepseek", "baseUrl": "https://api.deepseek.com",
+      "note": "10-03 试过（nova-deepseek，deepseek-runtime 默认就是这个名字）。钥匙放 /root/.secrets/deepseek.secret（600）。窗口 128k 是人填的未核实" }
+  ]
+}

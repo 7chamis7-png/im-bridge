@@ -1,14 +1,20 @@
 {
   "name": "im-bridge",
-  "version": "0.1.0",
-  "description": "Bridge Telegram / WeChat / iMessage and other IM channels to a Claude Code (Agent SDK) session.",
-  "license": "MIT",
+  "private": true,
+  "bin": {
+    "im-bridge": "scripts/im-bridge.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
-    "test": "npm run test:runtime && npm run test:gate && npm run test:cli-host && npm run test:tools",
+    "init": "node scripts/im-bridge.js init",
+    "doctor": "node scripts/im-bridge.js doctor",
+    "test": "npm run test:runtime && npm run test:gate && npm run test:cli-host",
     "test:runtime": "node --test test/runtime/*.test.js",
     "test:gate": "bash test/run-gate.sh",
-    "test:cli-host": "node test/cli-host/split.js && node --test test/cli-host/codex-image.test.js test/cli-host/deepseek.test.js",
-    "test:tools": "node --test tools/telegram/test.js"
+    "test:cli-host": "node test/cli-host/split.js && node --test test/cli-host/deepseek.test.js test/cli-host/codex-image.test.js test/cli-host/codex-appserver.test.js test/cli-host/engine-host.test.js test/cli-host/engine-rebuild.test.js test/cli-host/usage.test.js test/cli-host/neutral-events.test.js",
+    "test:tools-reach": "node test/smoke/tools-reach.js"
   },
   "dependencies": {
     "@anthropic-ai/claude-agent-sdk": "0.3.278",

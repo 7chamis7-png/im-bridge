@@ -1,6 +1,6 @@
 "use strict";
 /**
- * Producer drop-box: how things outside the bridge push a turn in.
+ * 生产者投递口：桥外面的东西怎么推一轮进来（2026-09-18）
  * 盯的是：多进程同时投不丢、消化完了才删、坏文件不卡住后面的、有轮在飞就等。
  */
 const fs = require("fs");
@@ -21,17 +21,17 @@ const files = (d) => fs.readdirSync(d).filter((f) => f.endsWith(".json") && !f.s
   console.log("[1] 投一条、消化一条");
   {
     const dir = path.join(root, "a");
-    putNote({ dir, producer: "checkin", text: "定时 check-in" });
+    putNote({ dir, producer: "checkin", text: "她又浮上心头" });
     const inbox = makeProducerInbox({ dir });
     check("攒了 1 条", inbox.pending(), 1);
     const got = [];
     const r = await inbox.drain(async (n) => { got.push(n); });
     check("消化成功", [r.ok, r.failed], [1, 0]);
-    check("正文和生产者都带过来了", [got[0].text, got[0].producer], ["定时 check-in", "checkin"]);
+    check("正文和生产者都带过来了", [got[0].text, got[0].producer], ["她又浮上心头", "checkin"]);
     check("消化完文件就删了", files(dir).length, 0);
   }
 
-  console.log("\n[2] **多个生产者同时投不会互相覆盖**（单文件队列的坑）");
+  console.log("\n[2] **多个生产者同时投不会互相覆盖**（老桥单文件队列的坑）");
   {
     const dir = path.join(root, "b");
     // 模拟 20 个生产者进程同时投

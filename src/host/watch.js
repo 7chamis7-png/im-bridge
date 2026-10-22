@@ -1,61 +1,68 @@
 "use strict";
 
 /**
- * Watchdog: checks "is it still doing work", not "is it still alive".
+ * 守护件 —— 看「它还在干活吗」，不是「它还活着吗」（2026-09-18）
  *
- * Lives in src/host/: the bridge only publishes its state (heartbeat); who reads
- * it and what to do about problems is a host concern. The bridge knows nothing
- * about process managers.
+ * **这个文件不属于桥**（住 `src/host/`）。桥只管把状态摆出来（心跳），
+ * 谁来读、读出问题怎么办，是宿主的事 —— 桥不认识 pm2，也不该认识。
  *
- * ## Why not check "is the connection up"
+ * ## 为什么不看「连接在不在」
  *
- * A typical failure mode of chat bridges: the login session expires while the
- * websocket stays connected, and only the send calls time out. Everything looks
- * healthy while every message is lost. So every signal here is a number, mostly
- * a delta between two heartbeats: "received three, delivered none" is what matters.
+ * 东京那台 QQ 的教训（记忆 `project-tokyo-napcat-qq`）：**登录态失效的时候
+ * WS 还通着，只是 sendMsg 超时** —— 看连接一切正常，消息全丢。
+ * 老桥那几个守护件（fable-guard / stall-probe / context-monitor）盯的也都不是
+ * 「进程在不在」，是「活着但不干活」的某一种形态。
  *
- * ## Report only, never act
+ * 所以这里摆的判据全是**数**，而且大多是**两次心跳之间的差**：
+ * 进程好好活着、心跳照写、但「收了三条一条没出来」——那才是要命的。
  *
- * It never restarts anything: automatic restart loops can make a session worse,
- * and restarting the box can cut off a turn the agent is in the middle of.
- * There is no kill/restart/exec in this file.
+ * ## 只推不动
  *
- * ## Two ways to run it — you want both
+ * **一律不自动重启**（Alice 2026-07-15 对 fable-guard 定的：连续自动回滚/重启
+ * 怕把 session 越切越烂，决定权归她）。新桥这儿还多一条理由：
+ * **重启 = 盒子重开 = 可能把他正在说的那一轮腰斩**。
+ * 所以这个文件里没有任何 kill/restart/exec —— 它只会说话。
  *
- * - In-process (`GATE_WATCH_MS`): catches "alive but not working" (held messages
- *   growing, received but not answered, unknown delivery growing, context full).
- * - As a separate process (`node src/host/watch.js <heartbeat file>`): catches
- *   "process is gone". The in-process watcher cannot report its own death.
+ * ## 两种跑法，**都要有**
+ *
+ * · **跑在主进程里**（`GATE_WATCH_MS`）—— 抓「活着但不干活」：暂存涨了、
+ *   收了一条没出来、「不知道发没发」涨了、水位到顶。
+ * · **单独起一个进程**（`node src/host/watch.js <心跳文件>`）—— 抓「进程没了」。
+ *
+ * ⚠️ **进程内那个报不了自己的死**：进程一挂，守护跟着挂，心跳停在那儿也没人说话。
+ * 这不是小毛病 —— 「它死了」恰恰是最该被发现的那种。所以外面必须还有一个。
+ * （2026-09-18 接线时当场发现的：主进程带上守护之后我正要去验，
+ *   才想起来验不了 —— 掐掉进程，守护也一起没了。）
  */
 
 const fs = require("fs");
 
 /**
- * Read the heartbeat, retrying once (a read can race the writer's atomic rename).
- * The short busy-wait is intentional: this runs rarely, and making it async
- * would ripple through every caller of tick().
+ * 读心跳。**读两次** —— 见 tick 里的说明（撞上原子改名会扑空一次）。
+ * 两次之间空转一小会儿，不用异步：这个函数一分钟才跑一次，阻塞几毫秒无所谓，
+ * 而改成 async 会让 tick 的调用方全跟着变，不值。
  */
 function readTwice(file, gapMs = 50) {
   for (let i = 0; i < 2; i += 1) {
-    try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* retry once */ }
-    if (i === 0) { const until = Date.now() + gapMs; while (Date.now() < until) { /* wait */ } }
+    try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { /* 再试一次 */ }
+    if (i === 0) { const until = Date.now() + gapMs; while (Date.now() < until) { /* 等一下 */ } }
   }
   return null;
 }
 
-/** Heartbeat considered stale after this (writer defaults to every 15s; 3x margin). */
+/** 心跳多久没动就算停了（主进程默认 15 秒写一次，给 3 倍余量） */
 const DEFAULT_STALE_MS = 45_000;
-/** A received message not completed within this time counts as stuck. */
+/** 收了之后多久还没出来算卡住 */
 const DEFAULT_NO_REPLY_MS = 180_000;
 
 /**
- * What happened between two heartbeats. Pure function.
+ * 两份心跳之间发生了什么。**纯函数**，好测。
  *
  * @param {object} o
  * @param {number} o.now
- * @param {object|null} o.hb    current heartbeat (null if unreadable)
- * @param {object|null} [o.prev] previous heartbeat
- * @param {number} [o.prevAt]   when the previous one was read
+ * @param {object|null} o.hb    这次读到的心跳（读不到给 null）
+ * @param {object|null} [o.prev] 上次那份
+ * @param {number} [o.prevAt]   上次读到的时刻
  * @returns {{level:"ok"|"warn"|"bad", issues:Array<{code:string,text:string}>}}
  */
 function inspect({ now, hb, prev = null, prevAt = 0,
@@ -64,35 +71,35 @@ function inspect({ now, hb, prev = null, prevAt = 0,
   const issues = [];
   const add = (code, text, bad = false) => issues.push({ code, text, bad });
 
-  // --- the heartbeat itself ---
+  // ——— 心跳本身 ———
   if (!hb) {
     add("no_heartbeat", "读不到心跳文件 —— 进程可能没起来，或者家指错了", true);
     return { level: "bad", issues };
   }
   const beatAge = now - (Date.parse(hb.at) || 0);
   if (beatAge > staleMs) {
-    // The process may exist but no longer writes heartbeats: stuck.
+    // 进程可能还在，但**它已经不写心跳了** = 卡死。这正是「活着但不干活」
     add("heartbeat_stale",
       "心跳 " + Math.round(beatAge / 1000) + " 秒没动了（该 " + Math.round(staleMs / 1000) + " 秒内）"
       + " —— 进程可能还在，但它不干活了", true);
   }
 
-  // Restarted (upSec went backwards): deltas are meaningless this round
+  // 进程重启过（upSec 倒退）：差值没意义，这一轮只看心跳新鲜度
   if (prev && Number(hb.upSec || 0) < Number(prev.upSec || 0)) {
     add("restarted", "进程重启过（运行时间倒退了）—— 这一轮不比差值");
     return { level: issues.some((i) => i.bad) ? "bad" : "warn", issues };
   }
 
-  // Authoritative signal: `pending` is the number of unfinished tasks and
-  // `oldestPendingAt` is when the oldest one entered pending. It does not depend
-  // on the heartbeat interval. `out` may count streamed fragments, so it must not
-  // mask tasks that are still pending.
+  // 新桥的权威判据：pending 是还没有完成的任务数，oldestPendingAt 是其中最老
+  // 的那一个进入 pending 的时刻。它不依赖两次心跳之间的间隔，所以每 30 秒
+  // 写一次心跳也能看出同一个任务已经等了多久。out 可能是流式输出的片段，
+  // 不能拿它来遮住仍然 pending 的任务。
   const progress = hb.progress;
   const progressPresent = hasProgress(hb);
   const unknownTurns = progress && Number.isFinite(Number(progress.unknown))
     ? Math.max(0, Number(progress.unknown)) : 0;
-  // Describe a turn: which ledger, platform, text, and why it is stuck
-  // (counts alone are not enough to debug).
+  // 一条轮次的画像：在哪份账本、哪个平台、她说了啥、为什么卡（2026-09-20 加：之前只报个数，
+  // 排查时找错账本找了 40 分钟）
   const who = (row) => {
     if (!row || typeof row !== "object") return "";
     const bits = [];
@@ -118,7 +125,7 @@ function inspect({ now, hb, prev = null, prevAt = 0,
       const oldestRow = progress.oldestPending ? "，最老那条" + who(progress.oldestPending) : "";
       add("in_no_out",
         "仍有 " + pending + " 条任务等了 " + Math.round((now - oldest) / 60000)
-        + " 分钟没有完成" + phase + oldestRow + " —— 盒子可能挂死了（owner 那头收不到回复）", true);
+        + " 分钟没有完成" + phase + oldestRow + " —— 盒子可能挂死了（她那头是石沉大海）", true);
     }
   }
 
@@ -129,11 +136,11 @@ function inspect({ now, hb, prev = null, prevAt = 0,
     return (Number(g(hb)) || 0) - (Number(g(prev)) || 0);
   };
 
-  // --- The critical one: received, but nothing came out ---
-  // "Completed" means sent, deliberately silent, or explicitly failed. If none
-  // moved, the message went in and never came out.
-  // With `progress` present the signal above supersedes this. Without it, keep
-  // the legacy delta behavior; makeWatch passes its own cumulative pending.
+  // ——— 最要命的一条：收了，但一条都没出来 ———
+  // 判据是**真的走完一轮没有**，不是连接在不在。发出去 / 他选择沉默 / 明确失败
+  // 都算「走完了」；三样全没动，就是话进去了没出来。
+  // 有 progress 时上面的权威判据已经取代旧的相邻心跳差值。没有 progress
+  // 时保留 inspect 的纯函数兼容行为；makeWatch 会传入它自己累计的 pending。
   if (!progressPresent) {
     const gotIn = legacyPending == null ? d("stats.in") : 0;
     const cameOut = d("stats.out") + d("stats.silent") + d("stats.failed") + d("stats.blocked");
@@ -143,13 +150,13 @@ function inspect({ now, hb, prev = null, prevAt = 0,
       add("in_no_out",
         (legacyPending == null ? "收了 " + gotIn + " 条" : "仍有 " + legacyPending + " 条任务")
         + "，" + Math.round(span / 60000) + " 分钟没有完成"
-        + " —— 盒子可能挂死了（owner 那头收不到回复）", true);
+        + " —— 盒子可能挂死了（她那头是石沉大海）", true);
     }
   }
 
-  // --- ways the owner stops receiving messages ---
+  // ——— 她收不到话的几种 ———
   if (d("held") > 0) {
-    add("held_growing", "又有 " + d("held") + " 句话没有落点、暂存着 —— owner 收不到");
+    add("held_growing", "又有 " + d("held") + " 句话没有落点、暂存着 —— 她收不到");
   }
   const unknown = d("undelivered.等人核对");
   if (unknown > 0) {
@@ -160,8 +167,9 @@ function inspect({ now, hb, prev = null, prevAt = 0,
     add("failed_growing", "又有 " + d("stats.failed") + " 条发失败了");
   }
 
-  // --- context fill ---
-  // Without an authoritative limit, `limit` is null: never invent a percentage.
+  // ——— 水位 ———
+  // ⚠️ **不知道就说不知道**：上限没有权威来源时 limit 是 null，那就只报绝对值、
+  // 不编百分比（编一个分母出来，她看到的就是假的）。
   const f = hb.fullness || {};
   if (f.limit && f.ratio >= 0.9) {
     add("context_high", "上下文 " + Math.round(f.ratio * 100) + "% 了，该换舱");
@@ -234,19 +242,19 @@ function updateLegacy(legacy, hb, at) {
 }
 
 /**
- * Watch a heartbeat file. Reports only; never restarts anything.
+ * 守着一份心跳。**只推不动** —— 它不会重启任何东西。
  *
  * @param {object} o
  * @param {string} o.heartbeatFile
- * @param {function} o.notify  (report) => any; the host decides where it goes
+ * @param {function} o.notify  (报告) => any。说什么、说给谁，宿主决定
  * @param {function} [o.log]
- * @param {number} [o.repeatMs] repeat interval for the same issue (default 30 min)
+ * @param {number} [o.repeatMs] 同一个毛病多久提醒一次（默认 30 分钟，别刷屏）
  */
 function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
   onWaterline = null, waterlineRatio = 0.3, waterlineCooldownMs = 30 * 60_000, waterlineRetryMs = 5 * 60_000, heartbeatFile, notify, log = () => {}, repeatMs = 30 * 60_000,
   staleMs = DEFAULT_STALE_MS, noReplyMs = DEFAULT_NO_REPLY_MS, now = () => Date.now() } = {}) {
-  if (!String(heartbeatFile || "").trim()) throw new Error("watch needs a heartbeat file");
-  if (typeof notify !== "function") throw new Error("watch needs a notify function");
+  if (!String(heartbeatFile || "").trim()) throw new Error("守护件要一份心跳文件 —— 不许用默认值猜");
+  if (typeof notify !== "function") throw new Error("守护件要一个 notify（说给谁是宿主的事）");
   let prev = null, prevAt = 0;
   const legacy = { stats: null, pending: 0, pendingSince: 0 };
   const toldAt = new Map();
@@ -254,12 +262,14 @@ function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
   const highWaterFired = new Set();
   const waterlineAt = new Map();
   return {
-    /** Check once. Returns the verdict (used by tests). */
+    /** 看一眼。返回这次的判断（测试拿它断言）。 */
     tick() {
       const t = now();
-      // A single failed read is not "no heartbeat": the writer does
-      // write-tmp + rename, and a read can land in between. False alarms erode
-      // trust in real ones, so only two consecutive failures count.
+      // ⚠️ **一次读失败不算「没有心跳」**（2026-09-18 真跑时撞到的）：
+      // 主进程写心跳是「写临时文件 → rename」，守护正好在那一瞬间读就会扑空。
+      // 实测差 178 毫秒 —— 守护报「读不到心跳文件」，而那一刻进程好好活着。
+      // 一次失败就宣布进程没了 = 假警报，而假警报会让真警报没人信。
+      // 所以隔一下再试一次，两次都读不到才算数。
       const hb = readTwice(heartbeatFile);
       const restarted = !!(hb && prev && Number(hb.upSec || 0) < Number(prev.upSec || 0));
       if (hb && (restarted || hasProgress(hb))) {
@@ -276,7 +286,7 @@ function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
         legacyPending: hb && !hasProgress(hb) ? legacy.pending : null,
         legacyPendingSince: legacy.pendingSince });
 
-      // Don't repeat the same issue; speak on state changes
+      // 同一个毛病别刷屏（老桥 killswitch 那条经验：只在状态变化时出声）
       const currentCodes = new Set(r.issues.map((i) => i.code));
       for (const code of toldAt.keys()) {
         if (!currentCodes.has(code)) toldAt.delete(code);
@@ -286,30 +296,28 @@ function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
         for (const i of fresh) toldAt.set(i.code, t);
         const head = r.level === "bad" ? "【桥出事了】" : "【桥有点不对】";
         notify(head + "\n" + fresh.map((i) => "· " + i.text).join("\n"));
-        log("[watch] " + r.level + " " + fresh.map((i) => i.code).join(","));
+        log("[守护] " + r.level + " " + fresh.map((i) => i.code).join(","));
       }
-      // --- High-water closing turn ---
-      // While the session is still healthy (default 85%), ask the agent to wrap up
-      // once per session, instead of only on /new (by which point the old session
-      // may no longer be usable).
+      // ——— 水位线收尾（2026-09-21 Alice定）———
+      // 收尾轮以前只挂在 /new 上，而 /new 最常见的原因是安全层拒答 —— 那时旧舱什么都跑不了。
+      // 舱还健康的时候（默认 85%）先让他收一次尾；每个会话只推一次。
       const fw = (hb && hb.fullness) || {};
       if (typeof onHighWater === "function" && fw.limit && fw.ratio >= highWaterRatio && fw.threadId
         && !highWaterFired.has(fw.threadId)) {
         highWaterFired.add(fw.threadId);
         try { onHighWater({ ratio: fw.ratio, threadId: fw.threadId }); }
-        catch (e) { log("[watch] high-water closing turn not pushed: " + ((e && e.message) || e)); }
+        catch (e) { log("[守护] 水位线收尾没推出去：" + ((e && e.message) || e)); }
       }
-      // --- Waterline: trim the tool chain first, rotate the session if trimming can't free enough ---
-      // Cooldown per session (readings fluctuate); a handler returning retrySoon
-      // (e.g. agent is mid-turn) is retried after waterlineRetryMs.
+      // ——— 30% 撞线：先裁工具链，裁不动才换舱（2026-09-21 从老桥搬回；Alice 8-23/9-03 的判据）———
+      // 每条会话换完/裁完 30 分钟内不再动（水位读数会抖）；「他正在说话」这种回 retrySoon 就 5 分钟后再看。
       if (typeof onWaterline === "function" && waterlineRatio > 0 && fw.limit && fw.ratio >= waterlineRatio && fw.threadId
         && t - (waterlineAt.get(fw.threadId) || 0) >= waterlineCooldownMs) {
         waterlineAt.set(fw.threadId, t);
         Promise.resolve().then(() => onWaterline({ ratio: fw.ratio, used: Number(fw.used) || 0, threadId: fw.threadId }))
           .then((res) => { if (res && res.retrySoon) waterlineAt.set(fw.threadId, t - waterlineCooldownMs + waterlineRetryMs); })
-          .catch((e) => log("[watch] waterline handler failed: " + ((e && e.message) || e)));
+          .catch((e) => log("[守护] 水位撞线那一手出错：" + ((e && e.message) || e)));
       }
-      // Don't use a missing heartbeat as the baseline (would false-alarm after recovery)
+      // 心跳没读到就别拿它当上一份比（否则恢复之后第一轮会误报）
       if (hb) { prev = hb; prevAt = t; }
       return r;
     },
@@ -318,22 +326,22 @@ function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
 
 module.exports = { makeWatch, inspect, DEFAULT_STALE_MS, DEFAULT_NO_REPLY_MS };
 
-// --- Standalone mode: catches "process is gone" ---
+// ——— 单独起一个进程守（抓「进程没了」，进程内那个抓不到）———
 if (require.main === module) {
   const file = process.argv[2];
   if (!file) {
-    console.error("usage: node src/host/watch.js <heartbeat file> [interval ms]");
+    console.error("用法: node src/host/watch.js <心跳文件> [看一次的间隔毫秒]");
     process.exit(2);
   }
   const everyMs = Number(process.argv[3] || 30_000);
   const w = makeWatch({
     heartbeatFile: file,
-    // Standalone: report to stdout (collected by your process manager).
+    // 说给谁是宿主的事。单独跑的时候先落 stdout，pm2 会收进日志。
     notify: (m) => console.log(new Date().toISOString() + " " + m.replace(/\n/g, " | ")),
     log: () => {},
   });
-  console.log("watching " + file + " every " + Math.round(everyMs / 1000) + "s (report only)");
+  console.log("守着 " + file + "，每 " + Math.round(everyMs / 1000) + " 秒看一次。**只推不动。**");
   setInterval(() => {
-    try { w.tick(); } catch (e) { console.error("[watch] internal error: " + ((e && e.message) || e)); }
+    try { w.tick(); } catch (e) { console.error("[守护] 自己出错了：" + ((e && e.message) || e)); }
   }, everyMs);
 }

@@ -1,124 +1,165 @@
-# Runtime layer rules
+# 运行时层重写 —— 规则清单（重写前必读，重写后当验收单）
 
-These are the invariants the CLI/SDK runtime layer (`runtime/`, `cli-host/`,
-`adapters/box-runtime.js`) must keep. Each rule exists because breaking it
-causes the owner to receive a message twice, receive the wrong thing, or
-receive nothing. Code comments refer to rules by id (`A-1`, `B-2`, ...).
-
-Use this file as an acceptance checklist whenever the runtime layer is changed:
-every rule must either have a corresponding implementation (with a comment
-pointing here) or a test that covers it.
-
----
-
-## A. Acknowledgements and state: never send a fake receipt
-
-**A-1 — Control-command acks wait for the real result.**
-A command such as `/new` or a model switch must not report success at the
-moment the request is written to a socket. It reports success only after the
-runtime confirms the change. Likewise, a `write()` returning is not a result:
-an ingress row stays `started` until the real `result` frame arrives.
-
-**A-2 — No live CLI process must never mean a silently dropped message.**
-If no CLI is running when a message arrives, the message is persisted and the
-full `sendTurn` path is taken (start process → bind thread id → run opening
-injection). Do not spawn an ad-hoc process that does not know which session to
-resume. Only rows in `dispatching` (definitely not submitted) may be replayed
-automatically; see the ingress table in `runtime-arch.md`.
-
-## B. Origin and routing: reply where the message came from, never guess
-
-**B-1 — Origin is a structured field, never inferred from the body.**
-Prefixes injected into the prompt (channel instructions, state blocks, etc.)
-can push any in-body tag away from the start of the text. Trust the structured
-origin first, then the unprefixed original text, and only as a last resort the
-full body.
-
-**B-2 — The thread id is fixed at enqueue time, not at submit time.**
-A queued turn is submitted only after the previous turn's result, by which time
-the "active thread" may already have been cleared. Reading it at submit time
-yields an empty thread id and a lost routing mark. Replies are matched to their
-turn by the protocol UUID (`user_message_uuid`), never by "current turn",
-body text or a previous hit.
-
-## C. Injection: hard boundary between the agent's context and the owner's words
-
-**C-1 — When the caller manages opening injection, the runtime must not wrap it again.**
-Wrapping an injected persona block in `Current user message:` would label
-system context as something the owner said. The bridge always runs in
-"caller manages injection" mode.
-
-**C-2 — Hand-off summaries belong to the private thread and must never leak
-into a group session's opening.**
-
-## D. Models and fallback
-
-**D-1 — Decide "CLI-generated vs. agent-authored" from the envelope only.**
-A refusal or synthetic API error looks like an ordinary text block; only the
-message envelope distinguishes it (`model: "<synthetic>"`,
-`stop_reason: "refusal"`, `stop_details.type: "refusal"`, SDK `error` /
-`isSynthetic`). Keyword matching on the body breaks whenever the wording
-changes.
-
-**D-2 — Narration blocks are delivered as text; real thinking blocks are not.**
-Some models emit user-facing "narration" between tool calls inside a
-thinking-shaped block. Use the SDK's `narration_block_indexes` (with the
-signature tag as a fallback). `thinking_tokens=0` is not a reliable criterion.
-Real thinking is never delivered or exposed as text.
-
-**D-3 — The observed model is recorded in a read-only snapshot and never
-written back into the requested value.**
-The observed model id may lack suffixes present in the requested id (e.g. a
-context-window suffix). Writing it back would silently drop that suffix on the
-next launch. A differing observed id is therefore not by itself proof of a
-fallback.
-
-**D-4 — Do not claim `--fallback-model` handles refusals.**
-It is wired through, but it is documented for overload/unavailability; refusal
-handling is a separate path.
-
-**D-5 — Switching model on the same thread uses `setModel`.**
-This avoids process churn; it does not avoid rebuilding the prompt cache
-(caches are model-scoped). Keep the client-side model in sync so the next
-comparison does not trigger a needless restart.
-
-## E. Timeouts
-
-**E-1 — Long-running external rebuild steps get generous timeouts.**
-If a timeout fires while the session is being cleared, a message arriving in
-that window can wake the agent with stale state. Timeouts for such steps must
-be sized from measurement, not guessed.
-
-## F. Streaming
-
-**F-1 — Token-level streaming is off by default and enabled via environment
-variable** (`GATE_CLAUDE_PARTIAL=on`). `stream_event` frames must not change
-delivery behaviour; unknown frames and subtypes are ignored.
-
-## G. Billing
-
-**G-1 — After launch, check `init.apiKeySource`.**
-Wrapping the local CLI uses whatever authentication that CLI is configured
-with. If you intend to run on a subscription login, verify that
-`apiKeySource === "none"` on every launch and stop with an error otherwise, so
-the bridge never silently switches to metered API billing (for example because
-`ANTHROPIC_API_KEY` appeared in the environment or `--bare` was passed).
+> 2026-09-19。Alice：「今天要做的是新桥脱离 cyberboss，清楚依赖」→
+> 「那个核心我们昨天说要重新写的你忘记了吗」。
+>
+> 依据 `SPEC.md` 第 9 节：**不复用老桥代码。规则可以抄，实现全部重写。**
+>
+> 这份文件是"规则"那一半。下面每一条都是**一次事故换来的** —— 老代码里那些
+> 看着奇怪的判据，删掉哪一条就等于把那天的坑重新踩一遍。
+> **重写完拿这份当验收单逐条过。**
 
 ---
 
-## Other invariants
+## 一、要重写的是什么
 
-- **Deleting lines from a transcript breaks the chain.** When removing a line,
-  fix the next line's `parentUuid`, otherwise a resume only loads part of the
-  history. After such an edit, a running CLI must be reloaded so it re-reads
-  the leaf from disk.
-- **Two processes must never resume the same session id concurrently.** Each
-  keeps its own in-memory leaf and appends to the same file; the history forks.
-- **Restarting the process does not invalidate the prompt cache**; rewriting
-  history (new session, trimming) does.
+新桥两个进程（`nova-box` / `nova-gate`）一共拉进 64 个文件，其中 **41 个是新桥自己的**
+（`src/gate` 30 + `src/host` 11），**23 个借自老 cyberboss**。本次要重写的是其中最硬的一块：
 
-## Tests that guard this layer
+| 文件 | 行数 | 是什么 |
+|---|---|---|
+| `claudecode/index.js` | 1,047 | 运行时主体：起进程、换模型、换舱、开场注入 |
+| `claudecode/process-client.js` | 856 | 跟 CLI 的 stdio 对话：解析事件流、认来源、排队 |
+| `claudecode/events.js` | 174 | 事件形状 |
+| `claudecode/ipc-server.js` | 176 | 控制通道（换模型/换舱从这儿进来） |
+| `claudecode/project-settings.js` | 84 | 项目设置 |
+| `claudecode/reliable-ingress.js` | 56 | 入站可靠性 |
+| `codex/session-store.js` | 415 | ⚠️ **命名误导** —— 放在 codex 目录下，其实是通用会话存储，claudecode 一直在借用。重写时挪位置改名，别把 codex 目录带进新家 |
 
-`test/runtime/*.test.js`, and in `test/gate/`: `reliability-integration.js`,
-`turn-recovery.js`, `model-input.js`, `cold-real-replies-only.js`,
-`imessage-wiring.js`. These are behavioural contracts and must stay green.
+合计 **2,808 行**。
+
+**不在本次范围**（另行处理）：
+- `forge.js`(690) + `shared-instructions.js`(651) + `session-handoff-state.js`(316) —— 换舱那一套
+- 五个能力服务（TTS / 转写 / 识图 / 出图 / 听语气，1,047 行）—— 该像 `nova-notebook` 那样各自独立成包
+- 六个小工具（334 行）—— 抄走即可
+
+---
+
+## 二、规则（每条都带出处，改之前先看懂为什么）
+
+### A. 回执与状态：**绝不发假回执**
+
+**A-1｜控制命令的 ack 必须等真结果，不许 fire-and-forget。**
+> 2026-08-15 13:04 实测：`/new` 那条路在 socket 写出去那一刻就回她「✅ 已切换」，
+> 不管运行时成没成。结果他继续用旧舱说话（旧进程内存里还揣着 threadId），
+> **假回执把人骗了三分钟**。
+> —— 换模型按钮走同一条路，同样如实回。
+
+**A-2｜没有活着的 CLI 进程时，不许悄悄丢消息。**
+> 2026-07-22 晚实测：桥重启后她在 TG 连发三条全部石沉大海，连日志都没有，查了半小时。
+> **修法不是就地拉进程** —— 那样起来的进程不知道 resume 哪条 session、也不跑 forge。
+> 要走完整的 sendTurn 路径（拉进程 → 接 threadId → 跑 forge 开场）。
+
+### B. 来源识别与路由：**从哪来就从哪回，不靠猜**
+
+**B-1｜来源用结构化 origin，不从正文反推。**
+> Alice原话：「从哪个渠道进来 就从哪个渠道出去 不用他自己来分辨」。
+> 病根：下游用 `/^\s*<channel .../` 认来源，要求标签在**最开头**；而开场轮会加
+> WECHAT SESSION INSTRUCTIONS、续接轮会加【Nova自身状态】，标签一被顶下去就认不出来
+> → 她在 TG 说的话，回复全跑去微信。**8-29 换舱后新舱每一轮都中招。**
+> —— 优先信 IPC 给的结构化来路；没有再看**未加前缀的原话**；最后才退回整段解析。
+
+**B-2｜`threadId` 在入队时定死，不在提交时读。**
+> 排队的轮要等上一轮 result 才提交，而 `handleResult` 在排空队列前会把
+> `activeThreadId` 清空 —— 提交时再读就是空串，`turn.started` 带着空 threadId 发出去，
+> 投递层的闸直接丢掉这个事件，「这是 TG 轮」的标记永远没打上。
+> 后果：**正文按默认投微信，冷层那边却按 telegram 轮豁免不记，两头口径不一致。**
+> 2026-07-22 实测 turn-24/25。
+
+### C. 注入：**他的话和她的话之间要有硬边界**
+
+**C-1｜调用方自己管开场注入时，运行时不许再套一层。**
+> 2026-09-18 新桥实跑抓到：盒子注了人格包，运行时又把整段裹进 `Current user message:` ——
+> 等于**把「他是谁」那一包标成了她说的话**。正是「她的话只能来自她」要防的那件事。
+> —— 新桥一律走"调用方管注入"，这个开关不是可选项。
+
+**C-2｜交接 summary 是私聊线的东西，绝不能漏进群开场。**
+> 曾经抹了其他五项却漏了这个字段，等于把私聊的交接证据原样注进群 session。
+
+### D. 模型与掉档
+
+**D-1｜判「这条是 CLI 造的还是他说的」只看信封，不看正文。**
+> 2026-09-18 23:18 安全层拒答的信封：
+> `{"model":"<synthetic>","stop_reason":"refusal","stop_details":{"type":"refusal","category":"cyber"}}`
+> 而 content 里就是普通 text 块，正文是「API Error: … safeguards flagged …」——
+> **跟他真说话长得一模一样**，只有信封分得开。
+> —— 正文判据＝关键词表＝改一次文案就漏。**只认信封。**
+
+**D-2｜旁白块（narration）按正文送，真思考块不投。**
+> Fable 5 系会在工具调用之间吐「旁白」（给用户看的进度小字），API 把它装在 thinking 块里，
+> 签名类型标签是 `narration`、`thinking_tokens=0`。
+> 2026-09-03 实测：他把「蛋还没破，喂了小白菜…」整段答复放进了这种块，
+> 最后 text 只剩「（记好了 等她）」—— **她只收到一句碎碎念。**
+> —— 判据是标签+thinking_tokens，不是"看起来像不像正文"。7-15 防思考泄露的规矩不动。
+
+**D-3｜实际在跑的模型只落只读快照，永远不碰请求值。**
+> 观测值不带 `[1m]` 后缀（requested=`claude-opus-5[1m]` / actual=`claude-opus-5`，
+> 这也是日志里 `fallback=true` 的真相，**不是真回落**）。
+> 照上游那样写回 `runtimeParams.model` 会把 `[1m]` 抹掉 → **下次起进程掉回 20 万窗口。**
+
+**D-4｜`--fallback-model` 能不能兜住掉档，是未验证的。**
+> Alice 9-14：「掉档可以选 帮我选 o5」。掉档时服务端默认把他扔到 opus-4-8（24 次里 24 次），
+> 那个目标我们改不了。CLI 的 `--fallback-model` 官方只写"主模型 overloaded 或不可用时"，
+> **没写"被拒答时"**。→ 重写时照样接上，但**别在文档里说它治掉档**，等真掉档才知道。
+
+**D-5｜同线程换模型走 `set_model`，省的是进程 churn，不是钱。**
+> prompt cache 按模型分开存（官方："caches are model-scoped"，换模型没有豁免），
+> 换完下一轮整段上下文要在新模型上重建缓存。
+> —— `client.model` 要一起改，否则下次比对发现不一致又白白重开一次进程。
+
+### E. 时限
+
+**E-1｜快照重建的超时是 180 秒，不是 45 秒。**
+> 45s 是拍脑袋定的，而 DeepSeek 重建实测要 **57~62 秒**（08-01 62s、08-03 57s），
+> **每次 /new 都超时降级**。降级本身不致命，但开出一个竞态窗口：超时那刻就清 session，
+> 她若在文件落盘前开口，他就**带旧快照醒来**。08-03 那次只差 11 秒。
+
+### F. 流式
+
+**F-1｜token 级流式默认关着，靠环境变量开。**
+> 为电话加的（`stream_event / content_block_delta`，他一个字一个字往外冒）。
+> 没有它最早只能拿到"一段说完"——冷层实测 **92% 的轮次只有一段**，
+> 等于要干等他想完（中位 13.9 秒），电话里没法聊。
+> 事件 switch 没有 default，多出来的事件被忽略，所以**打开它不改变现有行为**。
+
+### G. 钱（2026-09-19 Alice想起来问的：「之前说 cc 的 sdk 要单独收费」）
+
+**G-1｜起进程之后必须确认 `apiKeySource === "none"`，不是就报错停下。**
+
+> SDK 有两种用法，计费完全不同：
+> · **包着本机 CLI**（`pathToClaudeCodeExecutable` 指向 `claude`）→ **走 OAuth 订阅**
+> · 直接连 Anthropic API（`ANTHROPIC_API_KEY`）→ **按量计费**
+>
+> 2026-09-19 实测：裸 CLI 和 SDK 两条路的 `system/init` 里
+> **`apiKeySource` 都是 `"none"`**，环境里也没有 `ANTHROPIC_API_KEY`。
+> 所以我们这个用法不花 API 的钱。
+>
+> ⚠️ **但这是"哪天悄悄开始烧钱"的那类风险，有前科**：
+> `--bare` 会禁掉 OAuth 变成按量计费（PASS A 那次踩过）。
+> 所以不能"跑通了就不管"——**每次起进程读一次 `init.apiKeySource`，
+> 不是 `none` 就当场停下报错**，别闷头跑到月底才发现。
+
+---
+
+## 三、重写之外还要守住的（来自记忆库，不在代码注释里）
+
+- **改 CLI 版本要重跑 forge validate** —— 伪造格式绑着 CC 版本，有三道闸挡着静默失忆
+- **重启不废缓存** —— 2026-09-12 实测：重启后 `cache_read=201,577` 全中，只写 3,238。
+  真正全价重写的是**改历史**（换舱/裁剪/forge 重组），不是重启
+- **删 transcript 行会断链** —— 删行必须改下一行的 `parentUuid`，否则 resume 只装一部分
+- **他会伪造入站** —— 判据是正文带 `user`；现有检测器写死 telegram + 锚定行首，有两个洞
+
+## 四、现有测试里盯着这一层的
+
+`test/gate/` 下：`reliability-integration.js` · `turn-recovery.js` · `model-input.js` ·
+`cold-real-replies-only.js` · `imessage-wiring.js`
+
+**重写时这几个必须继续绿** —— 它们是行为契约，不是实现细节。
+
+---
+
+## 五、验收
+
+重写完逐条过上面 A~G 共 **14 条规则**，每条要么在代码里有对应实现 + 注释指回这里，
+要么有测试盯着。**一条都不许"看起来不需要了"就丢掉** —— 每一条背后都是一次她那头
+收不到消息、或者收到错东西的事故。

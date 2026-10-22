@@ -1,18 +1,17 @@
 "use strict";
 
 /**
- * Inbound acceptance check.
+ * 入闸验收（设计稿 v1.5 §0.1）
  *
- * The gate does not decode, but it does verify. If a plugin skipped a
- * processing step (e.g. forgot zstd decompression) and hands in garbage, the
- * gate recognizes "this is not human text", flags and records it, and never
- * lets it pose as something the owner said.
+ * 闸不解码，但闸验收。插件漏了某步加工（例如忘记 zstd 解压）交上来一坨乱码，
+ * 闸认得出「这不像人话」，标注并登记，但**不让它冒充她说过的话**。
  *
- * Note: newline, carriage return and tab are normal text, not bad characters.
- * Forgetting that exclusion misclassifies almost every multi-line message.
+ * 判据来源：linux-db-watch.py 的 looks_binary()。2026-09-17 我抄这个判据时
+ * 漏了 `ch not in "\n\r\t"`，把换行当坏字符，19729 条正常消息被判成乱码
+ * （真实是 4 条）。**换行、回车、制表符是正常文本，不是坏字符。**
  */
 
-/** Must stay identical to looks_binary() in the WeChat db-watch.py. */
+/** 与 linux-db-watch.py:looks_binary 一字不差 */
 function looksBinary(text) {
   const s = String(text || "");
   if (!s) return false;
@@ -24,20 +23,19 @@ function looksBinary(text) {
   return bad >= 3 || bad / s.length > 0.05;
 }
 
-/** Plugins must declare which processing steps they applied; the gate verifies accordingly. */
+/** 0.5：插件必须声明自己做了哪几步加工，闸据此判断该按什么验收 */
 const KNOWN_STEPS = new Set([
-  "decrypted",      // platform decryption
-  "decompressed",   // decompression (WeChat long text uses zstd)
-  "parsed",         // platform-specific format parsing (e.g. appmsg xml)
-  "transcribed",    // speech transcription
-  "none",           // explicitly "no processing needed"
+  "decrypted",      // 平台解密
+  "decompressed",   // 解压（微信长文本走 zstd）
+  "parsed",         // 平台私有格式解析（如 appmsg xml）
+  "transcribed",    // 语音转写
+  "none",           // 明确声明「无需加工」
 ]);
 
 /**
  * @returns {{ok: boolean, verdict: string, reasons: string[]}}
  *   verdict: accepted | undecoded | no_content
- *   undecoded is not dropped: the event is still recorded, but its text may
- *   never be presented as the user's words.
+ *   undecoded 不是丢弃 —— 事件照样登记，只是正文不得充当用户原话。
  */
 function verifyInbound(delivery) {
   const reasons = [];

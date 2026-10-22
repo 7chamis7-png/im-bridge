@@ -47,7 +47,7 @@ test("cold write failure can be repaired by replay even after registration and n
   await assert.rejects(gate.pipe.ingest({ channel: "telegram", raw: raw(1) }), /disk/);
   await gate.pipe.ingest({ channel: "telegram", raw: raw(1) });
   assert.equal(read(path.join(root, "cold.jsonl")).filter((r) => r.role === "user").length, 1);
-  assert.equal(gate.store.maxSeq("owner"), 1);
+  assert.equal(gate.store.maxSeq("alice"), 1);
 });
 
 test("dedupe distinguishes same native message number in different chats", async () => {
@@ -93,8 +93,8 @@ test("hydrated image and voice reach real box adapter with offline services", as
   plugin.fetchMedia = async (item) => ({ bytes: item.kind === "image" ? Buffer.from([137,80,78,71,13,10,26,10,0]) : Buffer.from("RIFF0000WAVEaudio") });
   await gate.pipe.ingest({ channel: "telegram", raw: {} });
   assert.match(received.text, /caption/); assert.match(received.text, /remember the umbrella/);
-  // The runtime receives objects (absolutePath/contentType/isImage), not path strings -
-  // comparing paths alone would stay green even when images are not received.
+  // 2026-09-18：递给运行时的是对象（absolutePath/contentType/isImage），不是路径字符串 ——
+  // 只比路径的话，「图收不到」也照样绿（切桥当天就是这么漏过去的）。
   assert.equal(received.attachments.length, 1);
   const att = received.attachments[0];
   assert.ok(fs.existsSync(att.absolutePath), "附件路径要真存在");

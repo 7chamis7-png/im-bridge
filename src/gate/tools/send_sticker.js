@@ -1,5 +1,5 @@
 "use strict";
-/** Send a sticker. The sticker book lives in the shared layer; the tool only says "send this". */
+/** 发贴纸。贴纸库归共用层，工具只说「发这个」。 */
 module.exports = {
   name: "send_sticker",
   description: "Send one of your own stickers. Give either `sticker` (id or name) or `emoji`.",
@@ -9,7 +9,7 @@ module.exports = {
     properties: {
       sticker: { type: "string", description: "Sticker id or name." },
       emoji: { type: "string", description: "Or pick by emoji." },
-      channel: { type: "string", description: "Optional. Only when the user asked for a specific channel." },
+      channel: { type: "string", description: "Optional. Only when she asked for a specific channel." },
     },
   },
 };

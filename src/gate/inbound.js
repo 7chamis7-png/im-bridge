@@ -1,14 +1,14 @@
 "use strict";
 
 /**
- * Inbound gate (SPEC v1.5 §0.1) — always the last step.
+ * 入闸（设计稿 v1.5 §0.1）—— 永远是最后一步。
  *
- *   plugin: fetch from platform → decrypt → decompress → transcribe → [deliver]
- *                                                                      ↓
- *                                                                [inbound gate]  ← here
- *                          verify / resolve identity / assign sequence / write cold layer → hand to CLI
+ *   插件：平台收取 → 解密 → 解压 → 转写 → 【交付】
+ *                                            ↓
+ *                                       【入闸】  ← 就是这里
+ *                            验收 / 身份归一 / 编号 / 写冷层 → 交给 CLI
  *
- * The gate knows nothing about SQLCipher, zstd or speech models. It does exactly four things.
+ * 闸不懂 SQLCipher、不懂 zstd、不懂语音模型。它只做四件事，多一件都不做。
  */
 
 const { verifyInbound } = require("./verify");
@@ -20,10 +20,10 @@ class InboundGate {
    * @param {object} opts
    * @param {GateStore} opts.store
    * @param {ColdWriter} opts.cold
-   * @param {object} opts.identities  real platform ID → unified identity. Never identify people by nickname.
-   * @param {string} opts.sequenceScope sequence domain: one owner↔agent stream shared across channels
+   * @param {object} opts.identities  真实平台 ID → 统一身份。**不能靠昵称认人。**
+   * @param {string} opts.sequenceScope 编号域：Alice↔Nova这条流跨渠道共用一个
    */
-  constructor({ store, cold, identities = {}, sequenceScope = "owner" }) {
+  constructor({ store, cold, identities = {}, sequenceScope = "alice" }) {
     this.store = store;
     this.cold = cold;
     this.identities = identities;
@@ -31,11 +31,10 @@ class InboundGate {
   }
 
   /**
-   * Identity resolution: only configured real platform IDs; anything else is "unknown",
-   * never defaulted to the owner.
+   * 身份归一：只认配置过的真实平台 ID；认不出就是 unknown，绝不硬填成她。
    *
-   * This answers "who is this person", not "whose turn is this". Most people in a group are
-   * unknown by design; group turns are attributed by `identityForTurn`.
+   * **这个函数回答的是「这个人是谁」，不是「这一轮算谁的」。** 群里大部分人本来就
+   * 认不出来 —— 那不是故障。群轮该挂在谁名下由 `identityForTurn` 说了算。
    */
   resolveIdentity(delivery) {
     const key = delivery.channel + ":" + (delivery.senderId || "");
@@ -43,15 +42,14 @@ class InboundGate {
   }
 
   /**
-   * Whose turn is this. Private chat = the sender; group turn = the group
-   * (config key `channel:group:<chatId>`).
+   * 这一轮算谁的。私聊 = 发言人本人；群轮 = **这个群**（配置键 `channel:group:<chatId>`）。
    *
-   * Group turns are attributed to the group because other members are not in the allowlist;
-   * per-person resolution would block every group message. Who said what is carried by the
-   * speaker prefix the group gate renders into the body.
+   * 为什么群轮按群不按人（2026-09-18）：群里除了她，别人的 id 不会配进白名单，
+   * 按人认就是人人 unknown、整条被挡 —— 她在全家群说句话他都收不到。
+   * 谁说的不靠身份传，靠正文里的发言人前缀（群闸批量渲染时写进去）。
    *
-   * Never authorize commands with this identity: otherwise anyone in a group could run
-   * `/new`. Commands always use the person from `resolveIdentity`.
+   * ⚠️ **命令绝不能用这个身份来放行**：群轮的身份是群，拿它当门票等于
+   * 群里随便谁一句 `/new` 就能换他的舱。命令一律认 `resolveIdentity` 那个人。
    */
   identityForTurn(delivery) {
     const person = this.resolveIdentity(delivery);
@@ -64,7 +62,7 @@ class InboundGate {
   }
 
   /**
-   * A plugin delivers one message. The channel name is decided by the gate, not the plugin (§0.1).
+   * 插件交付一条消息。渠道标识由闸认定，插件不能自己起名（§0.1）。
    * @returns {{accepted:boolean, event:object, duplicate:boolean, injected:string|null}}
    */
   accept(delivery) {
@@ -72,13 +70,13 @@ class InboundGate {
       throw new Error("交付缺少 channel");
     }
     const verdict = verifyInbound(delivery);
-    // group turns are attributed to the group, private ones to the person — see identityForTurn
+    // 群轮挂在群名下，私聊挂在人名下 —— 见 identityForTurn 的注释
     const identity = this.identityForTurn(delivery);
 
     const { event, duplicate } = this.store.registerInbound({ ...delivery, identity }, verdict);
 
-    // Unknown identities are not delivered to the agent. Better to stop here and surface a
-    // config problem than to attribute someone else's words to the owner.
+    // 未知身份不投给他 —— 宁可停在这儿报配置故障，也不能把别人的话标成她的。
+    // 现网反面教材：bridge.js 硬写 from_is_alice="true"，白名单一丢就冒认。
     if (event.identity === "unknown") {
       this.store.appendEvent({
         kind: "inbound.blocked",
@@ -90,14 +88,14 @@ class InboundGate {
       return { accepted: false, event, duplicate, injected: null };
     }
 
-    // ==== Sequence numbers are assigned at delivery time ====
-    // The cold id is computed first and attached to the event; `assignSeqOnDeliver` logs it.
-    // The log never copies the body — it points back to the cold record by id (SPEC §6).
+    // ==== 编号在「投递给他」这一刻分配（Alice 2026-09-17 定）====
+    // 冷层 id 先算出来挂到事件上，`assignSeqOnDeliver` 落日志时一起写进去 ——
+    // 日志不复制正文，靠这个 id 指回冷层那一条（SPEC §6「两份，用 id 串」）。
     const coldId = "cold-" + event.eventId + "-user";
     event.coldId = coldId;
     const seq = this.store.assignSeqOnDeliver(event, this.sequenceScope);
 
-    // ==== The single cold-layer writer. Four fields only; technical fields are in the log above. ====
+    // ==== 唯一冷层写手。只有四个字段，技术字段全在上面那条日志里。 ====
     this.cold.write({ recordId: coldId, role: "user", ev: event });
 
     // Retrying after a partial write fills the missing cold record with the same
@@ -106,18 +104,19 @@ class InboundGate {
   }
 
   /**
-   * What the CLI sees. The sequence number is metadata next to the original text, which is
-   * never rewritten. Unverified bodies never pose as the owner's words.
+   * 交给 CLI 的样子。号作为元数据附在原文旁，不改写原文。
+   * 验收未过的正文不冒充她的话。
    */
   renderForModel(event, seq) {
-    // no_content must be stated explicitly: an empty body after "原文：" is more dangerous
-    // than a clear marker, because the model would fill in the blank itself.
+    // ⚠️ 2026-09-17：原来只给 undecoded 兜底，no_content 走到 ColdBody 返回空串，
+    // 投到他眼前就是「原文：」后面一片空白 —— 空白比明说更危险，他会自己脑补。
+    // 影子第一夜 1633 条 TG 全是这个形态（驱动取错字段），一条都没被拦住。
     let body;
     if (event.verdict === "undecoded") {
       body = "[未解码内容：插件交付的正文无法读取，原件已留在事件账本 " + event.eventId + "]";
     } else if (event.verdict === "no_content") {
-      body = "[空事件：既无正文也无媒体，多半是上游取值出错。**不要当成 owner 说了什么**，"
-           + "更不要猜 owner 想说什么。账本 " + event.eventId + "]";
+      body = "[空事件：既无正文也无媒体，多半是上游取值出错。**不要当成她说了什么**，"
+           + "更不要猜她想说什么。账本 " + event.eventId + "]";
     } else {
       body = ColdBody(event);
     }
@@ -138,12 +137,12 @@ function ColdBody(event) {
 }
 
 /**
- * The line shown to the agent for one media item.
+ * 一件媒体投给他的那一行。
  *
- * The processing layer (outside the gate) puts a readable description in `text`
- * (decrypted image path, voice transcript, ...); the gate uses it and never invents one.
- * Only when the processing layer produced nothing does it fall back to a label — a label,
- * never an empty string.
+ * ⚠️ 2026-09-17：原来这儿写死 `[图片]` / `[voice]`，**加工层做完的活全丢在半路**——
+ * 微信图片解密解出来了、语音 SILK 转写出来了，到他眼前还是一个光秃秃的标签。
+ * 现在的规矩：**加工层（闸外）把"他能读的一段话"放在 `text` 里，闸就用它，闸自己不造。**
+ * 加工层没给（没接线、取不到字节），才退回标签 —— 退回去也是标签，不是空白。
  */
 function mediaLine(m) {
   if (m && typeof m.text === "string" && m.text) return m.text;

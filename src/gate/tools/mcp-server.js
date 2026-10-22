@@ -2,25 +2,28 @@
 "use strict";
 
 /**
- * MCP shell for the bridge tools: exposes the tool plugins to the agent.
+ * 工具的 MCP 壳（2026-09-18）—— 把插件变成他能调的东西
  *
- * Claude Code only speaks MCP: it reads a config at startup and each server
- * reports its tools. Without this shell the files in `src/gate/tools/` would
- * be invisible to the agent.
+ * claude 只认 MCP 协议：启动时读一份 config，每个 server 报自己有哪些工具。
+ * 没有这层壳，`src/gate/tools/` 里那些文件对他来说**根本不存在**。
  *
- * The shell makes no decisions. It never touches tokens, platforms or channel
- * selection; it only:
- *   1. scans the plugin directory at startup and reports the tools
- *   2. forwards each tool call over a unix socket to the bridge, which runs it
- *      through the outbound gate, and returns the result verbatim
+ * ## 这层壳里不做任何决定
  *
- * Because delivery goes through the bridge, the channel follows the current
- * turn and every outbound message is recorded (cold log, outbound ledger).
+ * 它**不碰 token、不连平台、不猜渠道**，只干两件事：
+ *   1. 起来时扫一遍插件目录，把工具报给 claude
+ *   2. 他调某个工具 → 通过 unix socket 递给桥 → 桥走出闸 → 结果原样回给他
  *
- * Plugins with a `handler` (non-delivery work) run in this process directly.
+ * 这正是跟老桥的区别：老桥那 11 个投递工具是**在壳里自己把消息发出去的**，
+ * 于是渠道靠猜（她在微信说话、他的语音发去了 TG）、桥也不知道他说过话
+ * （不进冷层、不进账本，一换舱就失忆）。
  *
- * Usage: node src/gate/tools/mcp-server.js
- *   GATE_TOOL_SOCKET=<socket opened by the bridge>   required
+ * ## 干活类插件
+ *
+ * 带 `handler` 的插件（读日记、查记忆…）不投递，**就在这个进程里直接跑**，
+ * 不走 socket —— 那条通路是给"要发出去"的东西用的。
+ *
+ * 用法：node src/gate/tools/mcp-server.js
+ *   GATE_TOOL_SOCKET=<桥开的那个 socket>   必给
  */
 
 const net = require("net");
@@ -30,20 +33,20 @@ const { loadTools } = require("./index");
 const SOCKET = process.env.GATE_TOOL_SOCKET || "";
 const SERVER_NAME = process.env.GATE_TOOL_SERVER_NAME || "im_bridge";
 
-/** Logs go to stderr only: stdout is the MCP protocol channel. */
-const log = (m) => { try { process.stderr.write("[工具壳] " + m + "\n"); } catch { /* ignore */ } };
+/** 日志只能走 stderr —— stdout 是 MCP 的协议通道，写一个字就把它搞坏。 */
+const log = (m) => { try { process.stderr.write("[工具壳] " + m + "\n"); } catch { /* 无所谓 */ } };
 
 const { byName, errors } = loadTools({ log });
 for (const e of errors) log("装不上 " + e.file + "：" + e.why);
 
-/** Send one request to the bridge and wait for the result. One connection per call. */
+/** 递一条给桥，等它把结论带回来。**一次一连，不留长连接** —— 工具调用本来就不密。 */
 function askGate(payload, timeoutMs = 120_000) {
   return new Promise((resolve) => {
     if (!SOCKET) return resolve({ ok: false, error: "没有配 GATE_TOOL_SOCKET，壳够不着桥" });
     const sock = net.createConnection(SOCKET);
     let buf = "";
     let done = false;
-    const finish = (res) => { if (done) return; done = true; try { sock.end(); } catch { /* already closed */ } resolve(res); };
+    const finish = (res) => { if (done) return; done = true; try { sock.end(); } catch { /* 已经断了 */ } resolve(res); };
     const timer = setTimeout(() => finish({ ok: false, error: "桥没回（等了 " + Math.round(timeoutMs / 1000) + " 秒）" }), timeoutMs);
     sock.on("connect", () => sock.write(JSON.stringify(payload) + "\n"));
     sock.on("data", (c) => {
@@ -66,7 +69,7 @@ function toolList() {
   }));
 }
 
-/** MCP result shape: a content array. Failures carry a readable message. */
+/** MCP 要的回包形状：content 数组。**失败也要说人话**，别只给一个 false。 */
 function asContent(obj) {
   const text = typeof obj === "string" ? obj : JSON.stringify(obj, null, 2);
   return { content: [{ type: "text", text }] };
@@ -78,12 +81,12 @@ async function callTool(name, args) {
     return asContent({ ok: false, error: "没有这个工具：" + name
       + "；装上的是 " + [...byName.keys()].join(" / ") });
   }
-  // handler tools run in-process
+  // 干活类：就地跑，不走桥
   if (typeof plugin.handler === "function") {
     try { return asContent(await plugin.handler(args || {}, { log })); }
     catch (e) { return asContent({ ok: false, error: String((e && e.message) || e) }); }
   }
-  // delivery tools go to the bridge; the shell never sends by itself
+  // 投递类：交给桥。**壳自己不发**
   const { channel, text, ...rest } = args || {};
   const res = await askGate({
     id: "mcp-" + Date.now() + "-" + Math.random().toString(16).slice(2, 8),
@@ -129,7 +132,7 @@ process.stdin.on("data", async (chunk) => {
           error: { code: -32601, message: "不认识这个方法：" + req.method },
         }) + "\n");
       }
-      // notifications/* (e.g. initialized) have no id and need no reply
+      // notifications/*（比如 initialized）没有 id，不用回
     } catch (e) {
       if (req.id != null) {
         process.stdout.write(JSON.stringify({

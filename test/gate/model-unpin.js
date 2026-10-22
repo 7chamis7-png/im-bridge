@@ -1,7 +1,7 @@
 "use strict";
-// Model pinning: when GATE_MODEL is set, /model is refused. When unpinned, sessions.json decides:
-// describe() must report the stored model (the /model menu checkmark relies on it), and a
-// pinned setModel must fail honestly instead of reporting a fake success.
+// 2026-09-23 Alice：「模型没有钉住哪里吧」—— 钉着。GATE_MODEL 有值时 /model 一律被拒，
+// 按钮点了也白点。解钉后 sessions.json 说了算：这里盯住「解钉时 describe 报的是存的那个」
+// （/model 选单的 ✓ 靠它），以及「钉着时 setModel 如实拒绝，不报假成功」。
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
@@ -13,27 +13,27 @@ const { createImBridgeRuntimeAdapter } = require("../../adapters/box-runtime");
   const ok = (m) => { n += 1; console.log("  OK  " + m); };
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "model-unpin-"));
   const sessionsFile = path.join(dir, "sessions.json");
-  const WS = path.join(dir, "workspace");
+  const WS = "/root/nova";
   fs.writeFileSync(sessionsFile, JSON.stringify({ bindings: { "k": {
     activeWorkspaceRoot: WS,
     threadIdByWorkspaceRootByRuntime: { claudecode: { [WS]: "t1" } },
-    runtimeParamsByWorkspaceRootByRuntime: { claudecode: { [WS]: { model: "claude-opus-4-1", modelProvider: "" } } },
+    runtimeParamsByWorkspaceRootByRuntime: { claudecode: { [WS]: { model: "claude-opus-5-5[1m]", modelProvider: "" } } },
   } } }));
 
   const free = createImBridgeRuntimeAdapter({ sessionsFile, stateDir: dir, claudeModel: "" });
-  assert.strictEqual(free.describe().model, "claude-opus-4-1");
-  ok("unpinned: describe reports the model stored in sessions.json");
+  assert.strictEqual(free.describe().model, "claude-opus-5-5[1m]");
+  ok("没钉：describe 报 sessions.json 里存的那个（不是空）");
 
-  const r = await free.setModelForWorkspace({ workspaceRoot: WS, model: "claude-sonnet-4-5" });
-  assert.strictEqual(r.model, "claude-sonnet-4-5");
-  assert.strictEqual(free.describe().model, "claude-sonnet-4-5");
+  const r = await free.setModelForWorkspace({ workspaceRoot: WS, model: "claude-fable-5[1m]" });
+  assert.strictEqual(r.model, "claude-fable-5[1m]");
+  assert.strictEqual(free.describe().model, "claude-fable-5[1m]");
   const disk = JSON.parse(fs.readFileSync(sessionsFile, "utf8"));
-  assert.strictEqual(disk.bindings.k.runtimeParamsByWorkspaceRootByRuntime.claudecode[WS].model, "claude-sonnet-4-5");
-  ok("unpinned: after /model both disk and describe follow");
+  assert.strictEqual(disk.bindings.k.runtimeParamsByWorkspaceRootByRuntime.claudecode[WS].model, "claude-fable-5[1m]");
+  ok("没钉：/model 换完，存盘和 describe 都跟着变");
 
-  const pinned = createImBridgeRuntimeAdapter({ sessionsFile, stateDir: dir, claudeModel: "claude-opus-4-1" });
-  await assert.rejects(pinned.setModelForWorkspace({ workspaceRoot: WS, model: "claude-sonnet-4-5" }), /pinned/);
-  ok("pinned: /model is refused honestly");
+  const pinned = createImBridgeRuntimeAdapter({ sessionsFile, stateDir: dir, claudeModel: "claude-opus-5-5[1m]" });
+  await assert.rejects(pinned.setModelForWorkspace({ workspaceRoot: WS, model: "claude-fable-5[1m]" }), /钉死/);
+  ok("钉着：/model 如实拒绝，不报假成功");
 
-  console.log(`\npassed ${n} / failed 0`);
+  console.log(`\n通过 ${n} / 失败 0`);
 })().catch((e) => { console.error("FAIL", e.message); process.exit(1); });

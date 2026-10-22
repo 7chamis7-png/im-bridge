@@ -10,7 +10,7 @@ const setup = (options = {}) => createClaim({ bindings: new Map(), ...options })
 test('B-2：入队生成 UUID，写进消息且登记在调用方的表中', () => {
   const bindings = new Map();
   const claim = setup({ bindings, createUuid: () => 'generated' });
-  const message = { text: 'owner message' };
+  const message = { text: '她的原话' };
   const binding = claim.enqueue(message, origin());
   assert.equal(binding.uuid, 'generated');
   assert.equal(binding.message.uuid, 'generated');

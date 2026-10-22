@@ -1,10 +1,10 @@
 "use strict";
 /**
- * Commands.
+ * 命令（2026-09-18）
  *
- * Most important guard: an unregistered slash-prefixed message is plain text.
- * A message like `/hello` must never be swallowed by the bridge just because it
- * starts with a slash — that kind of silent loss is the hardest to debug.
+ * 最要紧的一条守卫：**没注册过的斜杠开头，一律当正文**。
+ * 她发 `/想你了`、`/抱抱`、`/滚`，绝不能因为开头有个斜杠就被桥吞掉 ——
+ * 那种消失最难查，她会以为他不理她。
  */
 const fs = require("fs");
 const os = require("os");
@@ -27,10 +27,10 @@ const check = (n, got, want) => {
 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-cmd-"));
-const OWNER = "10001";
+const HER = "1000000001";
 const tgMsg = (id, text) => ({
-  message_id: id, text, chat: { id: Number(OWNER), type: "private" },
-  from: { id: Number(OWNER) }, date: Math.floor(Date.now() / 1000),
+  message_id: id, text, chat: { id: Number(HER), type: "private" },
+  from: { id: Number(HER) }, date: Math.floor(Date.now() / 1000),
 });
 
 function build(dir, answer = () => "嗯") {
@@ -45,10 +45,10 @@ function build(dir, answer = () => "嗯") {
   const box = makeFakeBox({ answer });
   const pipe = makePipeline({
     plugins,
-    inbound: new InboundGate({ store, cold, identities: { ["telegram:" + OWNER]: "owner" } }),
+    inbound: new InboundGate({ store, cold, identities: { ["telegram:" + HER]: "alice" } }),
     outbound: new OutboundGate({ store, cold, plugins }),
     box,
-    router: makeRouter({ preferred: { platform: "telegram", chat_id: OWNER } }),
+    router: makeRouter({ preferred: { platform: "telegram", chat_id: HER } }),
     log: () => {},
   });
   return { pipe, sent, box, coldFile: path.join(root, dir, "cold.jsonl") };
@@ -61,13 +61,13 @@ function build(dir, answer = () => "嗯") {
   check("普通话不是命令", parse("在吗"), null);
   check("光一个斜杠不算", parse("/"), null);
 
-  console.log("\n[2] **没注册过的斜杠开头，一律当正文**（/你好 不许被吞）");
+  console.log("\n[2] **没注册过的斜杠开头，一律当正文**（她发 /想你了 不许被吞）");
   {
     const { pipe, sent, box } = build("a", (e) => "收到：" + e.payload.text);
-    const r = await pipe.ingest({ channel: "telegram", raw: tgMsg(1, "/你好") });
+    const r = await pipe.ingest({ channel: "telegram", raw: tgMsg(1, "/想你了") });
     check("当成正常一句话", r.accepted && !r.command, true);
     check("**进了盒子**", box._seen.length, 1);
-    check("agent 回了", sent.map((s) => s.text), ["收到：/你好"]);
+    check("他回了", sent.map((s) => s.text), ["收到：/想你了"]);
   }
 
   console.log("\n[2.5] 整合后桥自带的就三条（别的归宿主）");
@@ -81,11 +81,11 @@ function build(dir, answer = () => "嗯") {
     const { pipe, sent, box } = build("b");
     const r = await pipe.ingest({ channel: "telegram", raw: tgMsg(2, "/status") });
     check("认成命令", r.command, "status");
-    check("**没进盒子**（那不是跟 agent 说的话）", box._seen.length, 0);
-    check("回执发回 owner 了", sent.length, 1);
+    check("**没进盒子**（那不是跟他说的话）", box._seen.length, 0);
+    check("回执发回她了", sent.length, 1);
     check("回执一眼看清现状", /水位|进来/.test(sent[0].text), true);
-    // Last real receive / send per leg. A command does not count as "received"
-    // (it never reaches the box), so send a real message first.
+    // 每条腿最后一次真收 / 真发（9-21）。命令本身不算「收到」（它没进盒子），
+    // 所以先来一句真话让他回一次，再看 /status 两行时间都在
     check("还没真收过：不报那两行", /最后收到/.test(sent[0].text), false);
     await pipe.ingest({ channel: "telegram", raw: tgMsg(21, "在吗") });
     const again = await pipe.ingest({ channel: "telegram", raw: tgMsg(22, "/status") });
@@ -124,24 +124,32 @@ function build(dir, answer = () => "嗯") {
     check("**桥的代码里没有 diary 这个名字**", /diary/i.test(src), false);
   }
 
-  console.log("\n[6.5] 命令能带按钮 —— /model 弹选单，按一下就换");
+  console.log("\n[6.5] 命令能带按钮 —— /model 弹选单，按一下就换（2026-09-23）");
   {
     const calls = [];
     const store = new GateStore({ root: path.join(root, "btn") });
     const cold = new ColdWriter({ file: path.join(root, "btn", "cold.jsonl") });
-    // Any token: a TG leg without one reports offline and outbound blocks it (call is faked)
+    // token 随便给一个：没 token 的 TG 腿自报 offline，出闸会拦下（call 已经换成假的，不会真打出去）
     const plugin = new TelegramPlugin({ token: "test", call: async (m, p) => { calls.push([m, p]); return m === "sendMessage" ? { message_id: 1 } : []; } });
     const plugins = new Map([["telegram", plugin]]);
     const pipe = makePipeline({ plugins,
-      inbound: new InboundGate({ store, cold, identities: { ["telegram:" + OWNER]: "owner" } }),
+      inbound: new InboundGate({ store, cold, identities: { ["telegram:" + HER]: "alice" } }),
       outbound: new OutboundGate({ store, cold, plugins }),
       box: makeFakeBox({ answer: () => "嗯" }),
-      router: makeRouter({ preferred: { platform: "telegram", chat_id: OWNER } }), log: () => {} });
+      router: makeRouter({ preferred: { platform: "telegram", chat_id: HER } }), log: () => {} });
     const set = [];
-    const runtime = { describe: () => ({ model: "claude-opus-5-5[1m]" }),
+    const runtime = { describe: () => ({ model: "claude-opus-5-5[1m]", engine: "claude-cli" }),
       setModelForWorkspace: async ({ model }) => { set.push(model); } };
+    // 2026-10-21 S5：按钮从 $GATE_ROOT/models.json 来（不再写死），只列当前引擎下的
+    const regRoot = path.join(root, "btn-reg"); fs.mkdirSync(regRoot, { recursive: true });
+    fs.writeFileSync(path.join(regRoot, "models.json"), JSON.stringify({ v: 1, default: "claude-fable-5[1m]", models: [
+      { id: "claude-fable-5[1m]", engine: "claude-cli", window: 1000000, billing: "subscription" },
+      { id: "claude-fable-5-1[1m]", engine: "claude-cli", window: 1000000, billing: "subscription" },
+      { id: "claude-opus-5-5[1m]", engine: "claude-cli", window: 1000000, billing: "subscription" },
+      { id: "gpt-5.6-sol", engine: "codex-appserver", window: 872000, billing: "subscription" },
+    ] }));
     require("../../src/host/gate-commands-claudecode").registerClaudeCodeCommands(pipe.commands,
-      { runtime, box: { fullness: () => ({ model: "claude-opus-5-5" }) }, workspaceRoot: "/tmp/ws" });
+      { runtime, box: { fullness: () => ({ model: "claude-opus-5-5" }) }, workspaceRoot: "/tmp/ws", gateRoot: regRoot });
     await pipe.ingest({ channel: "telegram", raw: tgMsg(50, "/model") });
     const sm = calls.filter(([m]) => m === "sendMessage").pop()[1];
     check("实际裸名 vs 请求带 [1m]：不误报「没给到」", /没给到/.test(sm.text), false);
@@ -149,8 +157,9 @@ function build(dir, answer = () => "嗯") {
     check("回执真带了按钮（接线层：命令→出口→TG 腿）", kb.length >= 3, true);
     check("当前请求的那个打了勾", kb.some((b) => b.text.startsWith("✓ ") && b.callback_data === "/model claude-opus-5-5[1m]"), true);
     check("每个按钮都带 [1m]", kb.every((b) => b.callback_data.endsWith("[1m]")), true);
+    check("别家的（codex）不在 /model 的按钮里", kb.some((b) => /gpt-/.test(b.callback_data)), false);
     check("callback_data ≤ 64 字节", kb.every((b) => Buffer.byteLength(b.callback_data) <= 64), true);
-    // A button tap arrives as the command text itself
+    // 按一下 = TG 腿交出来的就是那条命令原文
     const r = await pipe.ingest({ channel: "telegram", raw: { ...tgMsg(51, kb[0].callback_data), message_id: "200-btn-x" } });
     check("按钮这句被当成 /model 命令", r.command, "model");
     check("真换了", set, [kb[0].callback_data.replace("/model ", "")]);
@@ -170,7 +179,7 @@ function build(dir, answer = () => "嗯") {
     const { pipe, sent, box } = build("g");
     const stranger = { ...tgMsg(7, "/new"), from: { id: 999 }, chat: { id: 999, type: "private" } };
     const r = await pipe.ingest({ channel: "telegram", raw: stranger });
-    // The command layer runs before inbound checks; strangers' commands must not execute
+    // 命令层在入闸之前跑，所以这里要确认：陌生人的命令**不执行**
     check("没执行（换舱这种事陌生人碰不到）", box._rotations(), 0);
     check("也没回执给陌生人", sent.length, 0);
     check("入闸挡下了", r.accepted, false);

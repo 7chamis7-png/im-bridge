@@ -9,9 +9,9 @@ function nonempty(value) {
 }
 
 /**
- * Standalone durable queue: no processes, no polling, no SDK.
- * Assumes exactly one live owner per filePath.
- * `io` exists only for fault injection; production uses node:fs.
+ * 独立持久队列，不起进程、不轮询、不接 SDK。
+ * 待确认假设：每个 filePath 只有一个存活的拥有者，见当日 worklog。
+ * io 只用于故障注入；生产默认使用 node:fs。
  */
 function createIngress({ filePath, io = fs } = {}) {
   if (!nonempty(filePath) || !path.isAbsolute(filePath)) {
@@ -39,7 +39,7 @@ function createIngress({ filePath, io = fs } = {}) {
         io.closeSync(fd);
       }
       io.renameSync(`${filePath}.tmp`, filePath);
-      // Both the file contents and the renamed directory entry must be durable before crossing the side-effect boundary.
+      // 文件内容与替换后的目录项都持久化，才能越过副作用边界。
       const directoryFd = io.openSync(directory, 'r');
       try {
         io.fsyncSync(directoryFd);
@@ -48,7 +48,7 @@ function createIngress({ filePath, io = fs } = {}) {
       }
       rows = next;
     } catch (cause) {
-      // A failure after rename may already have changed the disk; stop using the stale in-memory state.
+      // rename 后的失败可能已改变磁盘，不能继续用内存旧状态发消息。
       broken = true;
       throw new Error(`可靠投递无法保存到 ${filePath}，已停止写出：${cause.message}`, { cause });
     }
@@ -95,12 +95,12 @@ function createIngress({ filePath, io = fs } = {}) {
       if (previous.scope !== scope || !isDeepStrictEqual(previous.payload, copy)) {
         throw new Error(`入站 UUID ${uuid} 已有不同消息或会话，不能覆盖。`);
       }
-      // `uncertain` is not a reason to reject; a duplicate accept just returns the existing row.
+      // uncertain 不是拒收条件；重复接收只返回原记录，不重新执行。
       return get(uuid);
     }
     const next = new Map(rows);
     next.set(uuid, { uuid, scope, payload: copy, state: 'pending', error: null });
-    // runtime-rules A-2: persist even with no live process; never start the CLI from here.
+    // runtime-rules.md A-2：没有活进程也先持久保留，不在此处偷偷启动 CLI。
     persist(next);
     return get(uuid);
   }
@@ -121,18 +121,18 @@ function createIngress({ filePath, io = fs } = {}) {
     if (record(uuid).state !== 'dispatching') {
       throw new Error(`消息 ${uuid} 不在 dispatching 状态，不能提交或自动重放。`);
     }
-    // runtime-rules A-1/A-2: persist before crossing the side-effect boundary.
-    // `started` means "possibly submitted", not an SDK ack; no await may be inserted around it.
+    // runtime-rules.md A-1/A-2；runtime-arch.md §3：副作用边界必须先落盘再写出。
+    // started 意为「可能已提交」，不是 SDK 的确认；此处前后都不可插入异步等待。
     const started = change(uuid, 'started');
     try {
       await write(started.payload);
-      // runtime-rules A-1: write() returning is not a result; stay `started` until the real result.
+      // runtime-rules.md A-1：写出函数返回不代表结果，保留 started 等真实 result。
       return get(uuid);
     } catch (cause) {
       if (!closed && !broken && record(uuid).state === 'started') {
         change(uuid, 'uncertain', `写出时出错，可能已经提交，需人工对账：${cause?.message ?? String(cause)}`);
       }
-      // A late result may already have completed the row; never downgrade `completed` because write() rejected later.
+      // 迟到 result 可能已先完成；不能因写出 Promise 随后失败而把 completed 降级。
       throw new Error(`消息 ${uuid} 写出报错，不能自动重放；请核对保存的状态：${cause?.message ?? String(cause)}`, { cause });
     }
   }
@@ -140,7 +140,7 @@ function createIngress({ filePath, io = fs } = {}) {
   function interrupted(uuid, reason = '运行中断') {
     writable();
     const row = record(uuid);
-    // runtime-rules A-2: only `dispatching` (definitely not submitted) is replayable.
+    // runtime-rules.md A-2，架构 §3：只重放确定未提交的 dispatching。
     if (row.state === 'dispatching') return change(uuid, 'pending', `${reason}；尚未提交，可重放。`);
     if (row.state === 'started') return change(uuid, 'uncertain', `${reason}；可能已提交，需人工对账。`);
     return get(uuid);
@@ -153,8 +153,8 @@ function createIngress({ filePath, io = fs } = {}) {
     if (row.state !== 'started' && row.state !== 'uncertain') {
       throw new Error(`消息 ${uuid} 尚未提交，不能标成已收到结果。`);
     }
-    // runtime-rules A-1: driven only by real results. A late success may complete an `uncertain` row.
-    // A failed result stays `uncertain` (never claimed as success).
+    // runtime-rules.md A-1：只由真实结果驱动。uncertain 可以被迟到成功结果完成。
+    // 待确认假设：失败沿用旧规则留 uncertain，不声称成功，见 worklog。
     return change(uuid, failed ? 'uncertain' : 'completed', failed ? reason : null);
   }
 
@@ -181,7 +181,7 @@ function createIngress({ filePath, io = fs } = {}) {
     }
   }
 
-  // runtime-rules A-2: recovery is persisted too, so repeated restarts never turn `uncertain` into `pending`.
+  // runtime-rules.md A-2 / 架构 §3：恢复本身也落盘，反复重启不会让 uncertain 变 pending。
   const recovered = new Map(rows);
   for (const [uuid, row] of recovered) {
     if (row.state === 'dispatching') {

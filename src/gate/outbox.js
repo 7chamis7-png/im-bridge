@@ -163,13 +163,14 @@ class Outbox {
   }
 
   /**
-   * Keep the journal bounded: without pruning every send rewrites an ever
-   * growing file.
+   * 账本只增不减的话，每发一段话都要把整个文件重写一遍，跑几个月就变成负担。
    *
-   * Only settled operations (sent/failed/blocked/silent...) are dropped, oldest
-   * first. `unknown` and anything in flight is kept - those need a human to
-   * reconcile. Trade-off: the journal doubles as operationId dedup, so very old
-   * ids lose dedup; the default of 300 far exceeds any real retry window.
+   * 只丢**已经有结论**的那些（sent/failed/blocked/silent…），而且从最老的丢起。
+   * `unknown` 和任何还在途中的一条都不丢 —— 那些正是需要人来核对的。
+   *
+   * 代价说在前面：这份账本同时充当「同一个 operationId 别投第二遍」的去重依据，
+   * 丢掉旧记录等于放弃对那些**很久以前**的 operationId 的去重。保留 300 条
+   * （默认）远大于任何真实的重试窗口，所以换来的文件大小是划算的。
    */
   #pruneSettled() {
     const inFlight = new Set(["running", "submitted", "unknown"]);

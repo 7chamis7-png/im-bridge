@@ -29,9 +29,9 @@ const tg = new TelegramPlugin({
 });
 
 const IDENT = {
-  "imessage:+15550001111": "owner",
-  "wechat:wxid_owner": "owner",
-  "telegram:10001": "owner",
+  "imessage:+15550100001": "alice",
+  "wechat:Alice-wx": "alice",
+  "telegram:1000000001": "alice",
 };
 const inGate = new InboundGate({ store, cold, identities: IDENT });
 const outGate = new OutboundGate({ store, cold, plugins: new Map([["imessage", im], ["wechat", wx], ["telegram", tg]]) });
@@ -45,24 +45,24 @@ function check(name, got, want) {
 
 (async () => {
   console.log("\n[1] 三条渠道依次进闸，共用一条序列 (A29)");
-  const a = inGate.accept(im.toDelivery({ id: 1, handle: "+15550001111", text: "iMessage 说的", date: "2026-09-17T20:00:00Z" }));
+  const a = inGate.accept(im.toDelivery({ id: 1, handle: "+15550100001", text: "iMessage 说的", date: "2026-09-17T20:00:00Z" }));
   check("iMessage -> #1", a.event.userSeq, 1);
 
   const b = inGate.accept(wx.toDelivery({ local_id: 500, local_type: 1, create_time: 1789600000,
-    sender: "wxid_owner", raw: Buffer.from("微信说的", "utf8") }));
+    sender: "Alice-wx", raw: Buffer.from("微信说的", "utf8") }));
   check("微信 -> #2（不是 #1）", b.event.userSeq, 2);
 
   const c = inGate.accept(await tg.toDelivery({ message_id: 40001, text: "TG 说的",
-    chat: { id: 10001, type: "private" }, from: { id: 10001 }, date: 1789600100 }));
+    chat: { id: 1000000001, type: "private" }, from: { id: 1000000001 }, date: 1789600100 }));
   check("Telegram -> #3", c.event.userSeq, 3);
   check("三条渠道标识各自正确", [a.event.channel, b.event.channel, c.event.channel], ["imessage", "wechat", "telegram"]);
 
   console.log("\n[2] Telegram 特有的东西，核心一无所知也能跑");
   const g = await tg.toDelivery({ message_id: 40002, chat: { id: -100123, type: "supergroup" },
-    from: { id: 10001 }, date: 1789600200, text: "群里说的" });
+    from: { id: 1000000001 }, date: 1789600200, text: "群里说的" });
   check("群聊被识别", g.chatType, "group");
-  const v = await tg.toDelivery({ message_id: 40003, chat: { id: 10001, type: "private" },
-    from: { id: 10001 }, date: 1789600300, voice: { file_id: "AwAC123" } });
+  const v = await tg.toDelivery({ message_id: 40003, chat: { id: 1000000001, type: "private" },
+    from: { id: 1000000001 }, date: 1789600300, voice: { file_id: "AwAC123" } });
   check("语音在闸外转写完才交付", v.processing, ["transcribed"]);
   check("交付的是文字不是 file_id", v.text, "这是语音转出来的文字");
   check("原始语音仍作为媒体保留", v.media[0].kind, "voice");
@@ -78,7 +78,7 @@ function check(name, got, want) {
 
   console.log("\n[4] 冷层：一个写手，三条渠道");
   const lines = fs.readFileSync(path.join(root, "cold.jsonl"), "utf8").trim().split("\n").map(JSON.parse);
-  // channel and sequence are technical fields (log); the cold layer only has id/role/at/text (SPEC §6)
+  // 2026-09-18：渠道和编号是技术字段，归日志；冷层只有 id/role/at/text（SPEC §6）。
   check("冷层就四个字段", [...new Set(lines.flatMap((l) => Object.keys(l)))].sort(),
     ["at", "id", "role", "text"]);
   const log = fs.readFileSync(path.join(root, "events.jsonl"), "utf8")

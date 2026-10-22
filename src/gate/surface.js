@@ -1,58 +1,62 @@
 "use strict";
 
 /**
- * Capability surface: three layers.
+ * 能力面：三层（2026-09-17 Alice「要分哪些是共用的、哪些是只有这个插头才能用的」）
  *
- * Without the third layer things get dropped silently: e.g. `inline_keyboard`
- * passed on a WeChat turn has no place in send() and would vanish unreported.
+ * 原来只分了两层（公共能力 / 平台支不支持这个意图），漏了第三层，
+ * 而漏的地方正好会**静默丢东西**：他在微信轮里给了 `inline_keyboard`，
+ * 出闸的 `send()` 签名里压根没这个参数，连报都不报 —— 跟「不许静默丢」直接冲突。
  *
- * +- Layer 1: shared capabilities (outside the gate, one instance for all channels)
- * |    transcription / speech synthesis / image generation / file store
- * +- Layer 2: common intents (every plugin must declare support or not)
- * |    text / image / file / voice / sticker / reaction / call
- * +- Layer 3: plugin-specific extras (features only one platform has)
- *      Telegram buttons, reply-to, Markdown ...
+ * ┌─ 第 1 层 **共用能力**（闸外，每样只有一份，所有渠道共用）
+ * │    转写 / 识图 / 语音合成 / 图片生成 / **文件仓** —— 新接一个渠道自动就有
+ * ├─ 第 2 层 **通用意图**（每个插头都必须表态支不支持）
+ * │    发文字 / 发图 / 发文件 / 发语音 / 发贴纸 / 点表情
+ * └─ 第 3 层 **插头专属**（只有某个平台有的花样）
+ *      TG 的按钮、回复某一条、Markdown；iMessage 的语音气泡；微信什么都没有
  *
- * Rule: a layer-3 extra used on a channel that lacks it must be reported as
- * "not available on this channel", never silently ignored.
+ * 判决规则：**第 3 层的东西在不支持的渠道上，必须明说"这个渠道给不了"，不许假装没发生。**
  */
 
-/** Layer 1: shared capabilities -> intents that cannot work without them. */
+/** 第 1 层：共用能力。左边是能力名，右边是没它就办不成的意图。 */
 const SHARED_CAPABILITIES = {
   synthesize_voice: ["send_voice"],
   generate_image: ["send_generated_image"],
-  transcribe: [],        // inbound side (speech-to-text)
-  acoustic: [],          // inbound side (optional prosody/tone analysis appended to transcripts)
-  // No separate `vision` capability: images are passed to the model directly
-  // (media-pipeline PLAN: image/sticker = "look"). Listing an unused capability
-  // would make missingShared() report a permanent false alarm.
-  // file_store: guarantees media files exist with a known name and type;
-  // plugins only fetch bytes.
+  transcribe: [],        // 入站侧用（语音转文字）
+  acoustic: [],          // 入站侧用（听语气 north-ear，拼在转写后面）
+  // ⚠️ `vision`（识图）2026-09-19 **从这张表上撤了**。Alice：「识图本来Nova
+  //    也没有在用 走的是自己的识图」。图片的主路是他自己看原图
+  //    （media-pipeline 的 PLAN：image/sticker = "look"），识图只是运行时
+  //    吃不下图时的兜底，而那条兜底是死的 —— NOVA_VISION_* 五个配置项
+  //    生产里一个都没配，真走到那儿第一行就抛。
+  //    留在这张表上的后果是：`missingShared()` 永远报缺一样，面板天天挂个假红。
+  //    真要接识图是新写一个独立包，那时再加回来。
+  // 2026-09-17 Alice一句「那文件呢」补的第五样：转写和识图都吃文件路径，
+  // 得有人保证那个文件真在、叫什么、是什么类型。插头只管从平台拿字节。
   file_store: [],
 };
 
-/** Layer 2: common intents. Every plugin must declare each of these in capabilities. */
+/** 第 2 层：通用意图。每个插头都要在 capabilities 里对这些表态。 */
 const COMMON_INTENTS = [
   "send_text", "send_file", "send_voice", "send_sticker", "send_generated_image", "react",
-  // Calls: only start and end. Answering depends on platform multi-device
-  // behavior, which the bridge does not control.
+  // 2026-09-18：打电话。**只有「发起」和「挂断」** —— 接听那半跟平台的多端策略
+  // 有关（铃声去哪台设备不归桥管），所以不在这张表上。
   "start_call", "end_call",
 ];
 
 /**
- * Layer 3: plugin-specific args. Key = arg name, value = channels that honor it.
- * Other channels receiving it report `extra_unsupported` instead of dropping it.
+ * 第 3 层：插头专属参数。键是参数名，值是**认它的渠道**。
+ * 不在列表里的渠道收到这个参数 → 报 `extra_unsupported`，不静默丢。
  */
 const PLUGIN_EXTRAS = {
-  inline_keyboard: ["telegram"],            // option buttons (Bot API only)
-  reply_to_message_id: ["telegram"],        // reply to a specific message
-  parse_mode: ["telegram"],                 // Markdown rendering
-  emoji: ["telegram"],                      // emoji reaction on a message
-  message_id: ["telegram"],                 // target message; defaults to the owner's message of this turn
+  inline_keyboard: ["telegram"],            // 选项按钮：只有 Bot API 有
+  reply_to_message_id: ["telegram"],        // 回复某一条：微信/iMessage 没有这个概念
+  parse_mode: ["telegram"],                 // Markdown 渲染
+  emoji: ["telegram"],                      // 气泡角上的表情回应
+  message_id: ["telegram"],                 // 点哪一条 / 回哪一条：不给就默认她本轮那条
 };
 
 /**
- * Classify tool args into the three layers.
+ * 把工具参数按三层分类。
  * @returns {{content:object, extras:object, unsupported:Array<{name:string,channel:string,honoredBy:string[]}>}}
  */
 function classifyArgs({ args = {}, channel }) {
@@ -70,8 +74,8 @@ function classifyArgs({ args = {}, channel }) {
 }
 
 /**
- * Plugin self-check: are all common intents declared, which extras are honored.
- * Distinguishes "not wired" from "platform genuinely unsupported".
+ * 一个插头的能力自检：通用意图有没有表态干净、专属参数认哪些。
+ * 用来在接线时把「没接线」和「平台真不支持」分开（§7.3）。
  */
 function describePlugin(plugin) {
   const caps = (plugin && plugin.capabilities) || {};
@@ -81,12 +85,12 @@ function describePlugin(plugin) {
     channel,
     supported: COMMON_INTENTS.filter((i) => caps[i] === "supported"),
     unsupported: COMMON_INTENTS.filter((i) => caps[i] === "unsupported"),
-    undeclared: missing,                      // undeclared = unknown; the gate blocks it
+    undeclared: missing,                      // 没表态 = 不知道，闸会按 unknown 挡
     extras: Object.entries(PLUGIN_EXTRAS).filter(([, ch]) => ch.includes(channel)).map(([k]) => k),
   };
 }
 
-/** Shared capabilities not yet registered - checked at wiring time, not at runtime. */
+/** 哪些共用能力还没注册 —— 接线前照这张表点名，别等运行时才发现缺。 */
 function missingShared(caps) {
   return Object.keys(SHARED_CAPABILITIES).filter((n) => !(caps && caps.has(n)));
 }

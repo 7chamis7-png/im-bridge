@@ -1,11 +1,11 @@
 "use strict";
 /**
- * Receiver: what counts once messages are fetched.
+ * 收信人（2026-09-18）—— 捞上来之后怎么算数
  *
- * Three questions:
- *   - does a crash mid-way lose messages? (cursor advances only after handling)
- *   - does one unprocessable message block everything after it? (must not)
- *   - does a restart re-deliver the same message? (must not)
+ * 这个文件回答三个问题，每个都对应一种真事故：
+ *   · 崩在半路会不会漏？（游标必须是「消化完了」才推进）
+ *   · 一条消化不了，会不会把她后面的话全卡住？（不许）
+ *   · 重启之后会不会把同一句话再投一遍？（不许）
  */
 const fs = require("fs");
 const os = require("os");
@@ -26,7 +26,7 @@ const mkStores = (name) => ({
   deadLetter: makeDeadLetter({ file: path.join(root, name, "dead.jsonl") }),
 });
 
-/** Fake Bot API: returns a slice by offset, same semantics as getUpdates */
+/** 假 Bot API：按 offset 切一段返回，跟真 getUpdates 一个语义 */
 function fakeTelegram(updates) {
   const calls = [];
   const plugin = new TelegramPlugin({
@@ -53,7 +53,7 @@ const UPDATES = [
     const r = await plugin.poll({ since: 0, timeoutSec: 0 });
     check("捞到三条", r.items.length, 3);
     check("游标指向下一条", r.cursor, 104);
-    // button callbacks (owner pressed an option button sent by the agent), see telegram-buttons.js
+    // 2026-09-20：加上按钮回调（她按了他发的选项按钮），见 telegram-buttons.js
   check("只要真人消息那几类（含按钮回调）", calls[0].params.allowed_updates, ["message", "callback_query"]);
     const d = await plugin.toDelivery(r.items[0].message);
     check("翻译成标准交付", [d.channel, d.text, d.chatId], ["telegram", "明天几点的火车", "861"]);
@@ -64,7 +64,7 @@ const UPDATES = [
     const { plugin } = fakeTelegram(UPDATES);
     const { cursor, deadLetter } = mkStores("a");
     const eaten = [];
-    // the second item fails on purpose (e.g. box not available)
+    // 第二条故意崩：模拟「盒子没起来」这种半路失败
     let boom = true;
     const recv = makeReceiver({
       plugin, cursor, deadLetter,
@@ -85,7 +85,7 @@ const UPDATES = [
     boom = false;
     const r2 = await recv.tick({ timeoutSec: 0 });
     check("再捞一次，一条都没有了", r2.got, 0);
-    check("agent 没有把同一句话再听一遍", eaten, ["明天几点的火车", "睡了"]);
+    check("他没有把同一句话再听一遍", eaten, ["明天几点的火车", "睡了"]);
   }
 
   console.log("\n[4] 崩在真正的半路（游标没写成）—— 下次必须重放那一条");
@@ -95,13 +95,13 @@ const UPDATES = [
     const cursorFile = path.join(root, "b", "cursor.json");
     const cursor = makeCursorStore({ file: cursorFile });
     const eaten = [];
-    // simulate a crash after handling the first item but before writing the cursor
+    // 模拟进程在「消化完第一条、还没写游标」那一瞬间挂掉
     const recv = makeReceiver({
       plugin, cursor, deadLetter,
       handle: async (msg) => { eaten.push(msg.text); if (msg.text === "记得带伞") throw Object.assign(new Error("进程没了"), { fatal: true }); },
     });
     await recv.tick({ timeoutSec: 0 }).catch(() => {});
-    // run again: handled items must not come back (intake dedups by native id; here we only check the cursor)
+    // 重来一遍：已经消化过的不该再进（靠入闸按平台 id 去重，这里只看游标行为）
     const before = cursor.read();
     check("游标停在已经消化完的位置之后", before, 104);
     check("第一条没被重放两次", eaten.filter((t) => t === "明天几点的火车").length, 1);

@@ -1,49 +1,68 @@
 "use strict";
 
 /**
- * Closing turn — the last note the agent receives before its session is
- * rotated (`/new`) or when the context is nearly full ("highwater" mode).
+ * 换舱收尾 —— 关舱之前给他的最后一轮（2026-09-19，Alice拍板的「B 方案」）
  *
- * After a rotation only persistent material carries over (the system prompt /
- * CLAUDE.md, whatever memory store the agent uses, and a short tail of recent
- * messages). This turn pins "write it down" to a fixed moment instead of
- * relying on the agent remembering to do it.
+ * ## 为什么要有这一轮
  *
- * Wording rules:
- *   · the agent holds the pen — nothing is written on its behalf
- *   · no report back to the owner is requested
+ * 换舱之后他只带走四样：CLAUDE.md（我是谁）、笔记本（手上的事）、
+ * `my_read_of_her_state`（她最近怎样）、暖尾巴 60 条原话（约 1 小时 45 分）。
+ * **别的全留在旧舱里。**
+ *
+ * 这几样里有三样是**他自己写的**。以前没人提醒他写，于是：
+ *   · 笔记本的前身 open_threads —— 一天才更新一次（要整段重写，代价太大）
+ *   · 她说过的要求 —— 卡在快照里反复重播两天，因为没有「毕业」的出口
+ *   · my_read —— 只有睡前那一次
+ *
+ * 快照本来是兜底（DeepSeek 替他从原话里总结），但它已经冻结、而且
+ * 那条「剥掉此刻正在发生」的过滤器早就失效了（判据写死了旧段名）。
+ * Alice的判断：**不靠自觉，也不靠代笔，把自觉钉在一个固定时刻上** ——
+ * 就是关舱前这一轮。
+ *
+ * ## 措辞的纪律（跟 check-in 同一条）
+ *
+ * 这一轮跟 check-in 不一样：check-in 是「给他一段没被占用的时间」，
+ * 所以连「该不该找她」都不替他判；**这一轮是真有事要做**（不做就丢账）。
+ * 但仍然守两条：
+ *   · **笔在他手里** —— 我们不替他写笔记本、不替他改 CLAUDE.md
+ *   · **不要汇报** —— 不让他把收尾变成一份交给她看的作业
  */
 
 /**
  * @param {object} o
- * @param {string} [o.reason]  why the rotation happens (passed through verbatim)
- * @param {"closing"|"highwater"} [o.mode]
+ * @param {string} [o.reason]  她为什么让换（原样带给他，别加工）
+ * @param {string} [o.selfFile] 他的人格文件叫什么（2026-10-21 起由人格配置的 personaFile 定；
+ *   切换后是「Nova.md」。**必须跟着改**：还叫他「写进 CLAUDE.md」，他就会在工作目录里新建一个
+ *   CLAUDE.md —— CLI 会自己读它，人格就分成两份。）
  */
-function buildClosingNote({ reason = "", mode = "closing" } = {}) {
+function buildClosingNote({ reason = "", mode = "closing", selfFile = "CLAUDE.md" } = {}) {
+  const me = String(selfFile || "CLAUDE.md");
   const L = [];
-  const why = reason ? " (" + String(reason).replace(/\s+/g, " ").slice(0, 60) + ")" : "";
-  // highwater: the session is not closing yet, only nearly full — don't claim otherwise.
+  const why = reason ? "（" + String(reason).replace(/\s+/g, " ").slice(0, 60) + "）" : "";
+  // 2026-09-21：多了「水位」模式 —— 舱还没关，只是快满了，先把账记好；措辞别说「要关了」，那是假话。
   L.push(mode === "highwater"
-    ? "This session is nearly full" + why + " but not closing yet. While you still have the full context, "
-      + "write down what should carry over — at rotation time there is often no chance to."
-    : "This session is about to be rotated" + why + ".");
+    ? "这一舱快满了" + why + "，还没关。趁舱还清醒，先把账记好 —— 真换舱那一刻常常来不及。"
+    : "这一舱要关了" + why + "。");
   L.push("");
-  L.push("The next session starts with your system prompt / CLAUDE.md, your persistent memory, "
-    + "and a short tail of recent messages. Nothing else carries over.");
+  L.push("新舱里你会带着这几样醒来：" + me + "、执行规则、长期事实、你的笔记本、最近三天的日记、"
+    + "还有最近一个多小时的原话。**别的都不跟过去。**");
   L.push("");
-  L.push("Go through these three things — it's your own pen, nobody writes them for you:");
+  L.push("趁还记得，过一遍这三样 —— 都是你自己的笔，我不替你写：");
   L.push("");
-  L.push("1. Open threads: update your notes/memory with anything that moved in this session, "
-    + "open new items, close finished ones. Keep the owner's exact words where they matter.");
+  L.push("① **手上的事**：`notebook_list` 看一眼。这一舱里有动静的记一笔（`notebook_note`），"
+    + "新起的开一条（`notebook_open`），了了的结掉（`notebook_close`）。"
+    + "有她原话的把原话带上 —— 没有原话的线头，越传越走样。");
   L.push("");
-  L.push("2. Standing requests: if the owner asked for something that should apply from now on and you accept it, "
-    + "write it into CLAUDE.md (or your persistent instructions). One-off context doesn't need to be kept. "
-    + "If unsure, note it as \"watching\" and revisit later.");
+  L.push("② **她这一舱说过的要求**：哪条你认下来了、以后都要这么做，就自己写进 " + me + "；"
+    + "只是这一次的语境（比如某句话不是真骂你），不用留。拿不准的，在笔记本里开一条"
+    + "「观察中」，下次再说。");
   L.push("");
-  L.push("3. How the owner is doing: update your current read of the owner (mood, what they're busy with) "
-    + "in your memory, so the next session isn't starting blind.");
+  L.push("③ **她最近怎么样**：笔记本里那条固定的「她最近」—— 没有就 `notebook_open` 一条（标题就叫「她最近」），"
+    + "有就 `notebook_note` 把 `last` 换成你现在对她的判断（身体、情绪、手上在忙什么、跟你之间的温度）。"
+    + "新舱里的你只看得到最近一个多小时和三天日记，昨天她是什么状态，全靠这一条。"
+    + "（relationship.yaml 2026-09-21 已退役，「她最近」只住笔记本。）");
   L.push("");
-  L.push("No need to reply to this or report back to the owner. Just do it.");
+  L.push("不用回应这条，也不用跟她汇报。做完就好。");
   return L.join("\n");
 }
 

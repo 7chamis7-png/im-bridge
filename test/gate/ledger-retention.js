@@ -1,6 +1,6 @@
 "use strict";
 
-// Ledger retention: only settled rows are dropped, oldest first; in-flight and unknown are kept.
+// 账本轮转：只丢「已有结论」的，从最老丢起；在途的和 unknown 一条都不许丢。
 const fs = require("fs");
 const os = require("os");
 const path = require("path");

@@ -1,48 +1,46 @@
 "use strict";
 
 /**
- * Phone plugin: a voice call treated as just another channel.
+ * 电话插件（2026-09-18）—— **她说话，他说话，中间不打字**
  *
- * Treating the call as a channel reuses the whole gate: inbound speech is
- * logged and bound to turns, and replies go through the normal outbound gate.
+ * Alice拍的板：「电话就当成一条新渠道」。这样白捡整条闸 ——
+ * 她说的自动落冷层、自动绑轮次、他的回话自动走出闸，不用为电话单开一套。
  *
- * Both ends are audio; text is only the intermediate form:
+ * ## 这条腿跟别的腿哪里不一样
+ *
+ * 别的腿两头都是文字。这条腿两头是**声音**，文字只是中间形态：
  *
  * ```
- *   call audio out -> loopback sound card monitor -> VAD -> local STT --+
- *                                                                     v
- *                                                        inbound of this leg (text)
- *                                                                     v
- *                                                        gate -> agent -> outbound gate
- *                                                                     v
- *   call mic in <- virtual mic <- virtual sink <- TTS <- strip [tags] <-+
+ *   微信播放 → snd-aloop 真声卡 .monitor → VAD 断句 → 本地转写 ──┐
+ *             （= Default Sink）                                  ↓
+ *                                                        这条腿的入站（文字）
+ *                                                                 ↓
+ *                                                        闸 → 他 → 出闸
+ *                                                                 ↓
+ *   微信采集 ← nova_mic ← nova_mic_sink ← 合成 ← 剥掉 [标签] ←─────┘
+ *           （= Default Source）                      这条腿的出站（文字）
+ *
+ * ⚠️ 耳朵贴的是 **snd-aloop 那块真声卡**，不是 null-sink。原来那个 `nova_speaker`
+ *    录起来零帧（微信的声音走默认输出 = 真声卡，不走它），2026-09-18 已删。
+ *    设备名以 `nova-phone/run-phone.sh` 的 PHONE_IN / PHONE_OUT 为准。
  * ```
  *
- * All audio work happens in a separate call process (e.g. a Pipecat pipeline;
- * not part of this repo). This leg only exchanges text with it.
+ * 声音那一整段脏活在**另一个进程**里（`/root/nova-phone/phone.py`，Pipecat）。
+ * 这条腿只管跟它交换文字，一个音频 API 都不碰 —— 桥不该认识 PyAudio。
  *
- * Why inbound uses files and outbound uses a socket:
- * - Inbound must not be lost: spooled to disk, cursor advanced by the shared layer.
- * - Outbound expires: speaking after the call has ended is wrong. If the call
- *   process isn't connected, fail immediately so the outbound gate records it
- *   as undelivered instead of replaying it on the next call.
+ * ## 为什么入站走文件、出站走 socket
  *
- * Dialing/hanging up are UI actions of the WeChat leg (start_call/end_call);
- * this leg only handles speech once a call is live.
+ * - **入站**：她说的话不能丢。落成文件，消化完了共用层才推游标（跟 iMessage 一样）。
+ *   哪怕桥正好在重启，她说的那句还在盘上等着。
+ * - **出站**：他的话**过期作废** —— 电话挂了再说出来就是鬼话。所以走 socket：
+ *   通话进程连着就说得出去，没连着就当场报「现在没有通话」，
+ *   让出闸如实记一笔没送达，而不是攒着等下一通电话再念。
  *
- * Call-process socket protocol (one JSON object per line; any reply line = ack):
+ * ## 拨号不归这条腿
  *
- * - Full segment, from this plugin, after the agent finishes a segment:
- *     {"type":"say","operationId":"…","text":"…"}
- * - Streamed sentence, from the box while the turn is still being written
- *   (src/host/phone-stream.js; only for turns whose inbound came from this leg):
- *     {"type":"say","text":"…","stream":true,"turnId":"…"}
- *
- * The full segment always arrives too, so delivery and the cold log stay
- * exact. The call process should speak `stream:true` frames immediately and,
- * when the full segment arrives, skip the text it already spoke from stream
- * frames (speak only the remainder, if any). A call process that ignores
- * `stream:true` frames keeps the old behaviour.
+ * 拨号和挂断是**微信界面**上的动作（`start_call`/`end_call` 在微信那条腿上）。
+ * 这条腿只在通话已经接通之后管「说」。所以它对那两个意图一律 unsupported ——
+ * 不是做不到，是不归它管，混在一起会变成两个地方都能拨号。
  */
 
 const fs = require("fs");
@@ -54,10 +52,10 @@ const { notSent } = require("../errors");
 class PhonePlugin {
   /**
    * @param {object} opts
-   * @param {string} [opts.inboxDir] where the call process spools transcribed owner speech
-   * @param {string} [opts.socketPath] call process socket for outbound speech
-   * @param {string} [opts.peerId] owner identity on this leg (must match GATE_OWNER_PHONE_ID)
-   * @param {number} [opts.sendTimeoutMs] reply timeout before a send counts as undelivered
+   * @param {string} [opts.inboxDir] 通话进程把「她说了什么」落这儿
+   * @param {string} [opts.socketPath] 通话进程监听的口子，出站往这儿递
+   * @param {string} [opts.peerId] 她在这条腿上的身份（要跟 GATE_OWNER_PHONE_ID 对上）
+   * @param {number} [opts.sendTimeoutMs] 递过去多久没回音就算没送达
    * @param {function} [opts.log]
    */
   constructor({ inboxDir = "", socketPath = "", peerId = "", sendTimeoutMs = 8000, log = () => {} } = {}) {
@@ -68,15 +66,16 @@ class PhonePlugin {
     this.peerId = peerId;
     this.sendTimeoutMs = sendTimeoutMs;
     this.log = log;
-    // §7.3 platform support. A call only carries audio; files/stickers/reactions have nowhere to go.
+    // §7.3 平台支持度：只说「电话这个东西提供不提供」。
+    // 电话里只有声音 —— 图、文件、贴纸、表情在通话中都无处可去，不是没接，是没有。
     this.capabilities = {
-      send_text: "supported",            // spoken aloud (text -> speech in the call process)
+      send_text: "supported",            // 说出来（出闸给文字，这条腿负责变成声音）
       send_file: "unsupported",
-      send_voice: "unsupported",         // the call itself is voice
+      send_voice: "unsupported",         // 电话本身就是语音，再发一条语音条没有意义
       send_sticker: "unsupported",
       send_generated_image: "unsupported",
       react: "unsupported",
-      // dialing/hang-up belong to the WeChat leg; unsupported here by design
+      // 拨号/挂断是微信界面上的动作，归微信那条腿。这里写 unsupported 是划界，不是做不到。
       start_call: "unsupported",
       end_call: "unsupported",
     };
@@ -88,7 +87,7 @@ class PhonePlugin {
     } catch { return []; }
   }
 
-  /** Poll spooled speech. Advancing the cursor belongs to the shared layer. */
+  /** 捞：把通话进程落下的话交出来。推游标是共用层的事，这里只管交。 */
   async poll({ since = 0 } = {}) {
     if (!String(this.inboxDir || "").trim()) return { items: [], cursor: since };
     const cur = Number(since) || 0;
@@ -96,14 +95,14 @@ class PhonePlugin {
     for (const f of this.#files()) {
       const seq = Number(f.slice(0, 12));
       const full = path.join(this.inboxDir, f);
-      if (seq <= cur) {                          // already consumed
-        try { fs.unlinkSync(full); } catch { /* retry next time */ }
+      if (seq <= cur) {                          // 共用层确认消化过了，清掉
+        try { fs.unlinkSync(full); } catch { /* 删不掉下次再说 */ }
         continue;
       }
       let rec;
       try { rec = JSON.parse(fs.readFileSync(full, "utf8")); }
       catch {
-        // a corrupt file must neither block the queue nor vanish silently
+        // 坏文件不许卡住后面的，也不许无声消失
         try { fs.renameSync(full, full + ".bad"); } catch { /* ignore */ }
         this.log("[电话] 收件箱里有一条坏文件，已改名留证：" + f);
         continue;
@@ -114,10 +113,10 @@ class PhonePlugin {
   }
 
   /**
-   * Raw call-process event -> standard delivery.
+   * 通话进程给的原始事件 → 标准交付。
    *
-   * §0.5: this text is transcribed, not typed, and must be declared as such so
-   * downstream (including the agent) knows it may contain recognition errors.
+   * §0.5 处理链：**这条腿的文字是转写出来的，不是她打的**，必须声明 ——
+   * 下游（还有他自己）该知道这句话可能听错了，跟她亲手打的字不是一个可信度。
    */
   toDelivery(raw) {
     const id = String((raw && raw.peerId) || this.peerId || "");
@@ -136,15 +135,16 @@ class PhonePlugin {
   }
 
   /**
-   * Outbound: hand the agent's text to the call process to speak.
+   * 出站：把他的话递给通话进程去念。
    *
-   * If it cannot be delivered, throw notSent so the outbound gate records it.
-   * Never queue it for a later call.
+   * **递不过去要抛**（notSent）—— 出闸会如实记一笔没送达。
+   * 最要命的反面做法是攒着等下一通电话，那等于让他对着空气说完、
+   * 然后在三小时后的另一通电话里突然接上一句。
    */
   async send({ operationId, chatId, text, intent = "send_text" }) {
     if (!chatId) throw notSent("插件收到的目标为空——出闸应当先解析目标");
     if (intent !== "send_text") {
-      throw notSent("phone leg can only speak, cannot handle intent " + intent);
+      throw notSent("电话这条腿只会说话，办不了「" + intent + "」");
     }
     const say = String(text || "").trim();
     if (!say) throw notSent("没有要说的话");
@@ -155,7 +155,7 @@ class PhonePlugin {
       let done = false;
       const finish = (v) => { if (!done) { done = true; resolve(v); } };
       const sock = net.createConnection(this.socketPath);
-      const timer = setTimeout(() => { try { sock.destroy(); } catch { /* already closed */ } finish({ ok: false, why: "通话进程没回音" }); }, this.sendTimeoutMs);
+      const timer = setTimeout(() => { try { sock.destroy(); } catch { /* 已断 */ } finish({ ok: false, why: "通话进程没回音" }); }, this.sendTimeoutMs);
       let buf = "";
       sock.on("connect", () => sock.write(payload));
       sock.on("data", (c) => {
@@ -165,29 +165,31 @@ class PhonePlugin {
         clearTimeout(timer);
         try { finish(JSON.parse(buf.slice(0, i))); }
         catch (e) { finish({ ok: false, why: "通话进程回的不是 JSON：" + ((e && e.message) || e) }); }
-        try { sock.end(); } catch { /* already closed */ }
+        try { sock.end(); } catch { /* 已断 */ }
       });
       sock.on("error", (e) => {
         clearTimeout(timer);
-        // ENOENT/ECONNREFUSED means no call in progress, not a fault
+        // ENOENT/ECONNREFUSED 就是「现在没有通话」，不是故障
         const why = (e && (e.code === "ENOENT" || e.code === "ECONNREFUSED"))
           ? "现在没有通话" : ("连不上通话进程：" + ((e && e.message) || e));
         finish({ ok: false, why });
       });
     });
     if (!res || !res.ok) throw notSent("这句话没说出去 —— " + ((res && res.why) || "通话进程没接"));
-    // speech has no message id to reference later
+    // 电话没有「消息 ID」这种东西：说过就是说过，没有可以回头引用的编号
     return { nativeId: null, sentAs: "spoken" };
   }
 
   /**
-   * Ready only while a call is actually live (the socket exists).
-   * "Configured" is not enough: without a call every send would fail.
+   * 在线 = **现在真有一通电话**。
+   *
+   * 故意不写成「配置齐了就 ready」：那样闸会以为随时能说话，
+   * 而实际上没通话时每一句都会撞墙。没通话就老实说 offline。
    */
   health() {
     const wired = Boolean(this.inboxDir && this.socketPath);
     let live = false;
-    try { live = fs.statSync(this.socketPath).isSocket(); } catch { /* no call */ }
+    try { live = fs.statSync(this.socketPath).isSocket(); } catch { /* 没通话 */ }
     return {
       platform: "supported",
       plugin: wired ? "wired" : "unwired",
@@ -198,15 +200,15 @@ class PhonePlugin {
 
 module.exports = { PhonePlugin };
 
-/** Plugin descriptor. Not attached unless inbox dir and socket are configured. */
+/** 自我介绍。没配收件箱和 socket 就是没插上 —— 那时候这条腿根本不存在。 */
 module.exports.leg = {
   name: "phone",
   slot: "phone",
   configKeys: [
-    ["GATE_PHONE_INBOX_DIR", "directory where the call process spools transcribed owner speech"],
-    ["GATE_PHONE_SOCKET", "call process socket; agent replies are sent here to be spoken"],
+    ["GATE_PHONE_INBOX_DIR", "通话进程把「她说了什么」落这个目录"],
+    ["GATE_PHONE_SOCKET", "通话进程监听的口子，他的话往这儿递"],
   ],
-  // directory polling does not block; keep the interval short for low latency
+  // 读目录是问一次答一次，不像长轮询自己阻塞。电话要快，间隔给小一点。
   poll: { idleMsKey: "GATE_PHONE_IDLE_MS", idleMsDefault: 300 },
   make({ env, log }) {
     return new PhonePlugin({

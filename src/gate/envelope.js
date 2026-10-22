@@ -1,58 +1,62 @@
 "use strict";
 
 /**
- * Envelope — the unified message format (SPEC §3).
+ * 信封 —— 统一消息格式（2026-09-18，Alice定，见 docs/SPEC.md §3）
  *
- * Everything entering or leaving the box has this shape: owner messages, producer pushes,
- * scheduled check-ins, agent replies. The origin is a structured field, never a line of text
- * inside the body.
+ * **所有**进出盒子的东西都长这样：她说的、晨笺推的、check-in 触发的、他回的，
+ * 一个结构。来路是**结构里的字段**，不是正文里的一行字。
  *
- * Why: guessing the origin by parsing the body breaks as soon as anything is prepended
- * (status lines pushing a `<channel ...>` tag down), system injections get mixed with user
- * text, and ID formats differ between legs (some prefixed with `telegram:`, some not).
- * Nothing prepended to a body can displace a field.
+ * 为什么非这样不可（三件真事，根子都是「靠读正文猜来路」）：
+ *   · 8-29 她在 TG 说话，他回到微信去了 —— 状态条把 `<channel …>` 那行标签顶下去，
+ *     投递层就猜不着这轮从哪来
+ *   · 7 月那批「她没发过的消息」 —— 系统注入和她的话在同一条文字流里，他分不清
+ *   · 9-17 差点栽：有的腿的 id 带 `telegram:` 前缀、有的不带，拿去调平台接口必然失败
+ *
+ * 前面贴多少东西都顶不掉一个字段。
  */
 
-/** Persisted records carry a schema version: what is written today must remain readable later. */
+/** 落盘的记录才带版本号（冷层里躺着四万八千条，今天写的三个月后还要读）。 */
 const SCHEMA_VERSION = 1;
 
 /**
- * Where a turn comes from — exactly three kinds:
- *   user   the owner said it on some channel
- *   system pushed by something outside the bridge (scheduled notes, reminders, ...) — NOT the owner's words
- *   box    said by the agent inside the box (outbound)
+ * 这一轮打哪来的，**只分三类**：
+ *   user   她从某条渠道说的
+ *   system 桥外面的东西推的（晨笺、提醒、身体状态…）—— **不是她说的话**
+ *   box    盒子里那位说的（出站）
  *
- * The concrete producer name goes into `source.producer`. The bridge never validates or
- * enumerates it (no tool names inside the bridge), so adding a producer needs no bridge change.
+ * ⚠️ 具体是「晨笺」还是「日记」还是「脉」，写在 `source.producer` 里，**桥不校验、
+ * 不认识、也不许在代码里枚举**（铁律 2/3：桥里不出现任何工具名）。以后加一个新的
+ * 产生者，桥一行不用改 —— 这正是「工具全部可拆卸」那条的落点。
  */
 const KINDS = Object.freeze(["user", "system", "box"]);
 
-/** Conversation role: entering the box = user, leaving the box = assistant. */
+/** 在对话里算谁说的：进盒子的是 user，出盒子的是 assistant。 */
 const ROLES = Object.freeze(["user", "assistant"]);
 
 /**
- * Verification verdicts. A body that did not pass must never pose as the owner's words.
- * The vocabulary must be identical to the inbound gate's (verify.js).
+ * 验收结论。没过的正文**不许冒充她的话**。
+ * ⚠️ 用词跟入闸（verify.js）**必须是同一套**：2026-09-18 第一版这儿写 "ok"、
+ * 那边产出 "accepted"，主循环一串起来就炸 —— 两套词迟早各自往下漂。
  */
 const VERDICTS = Object.freeze(["accepted", "undecoded", "no_content"]);
 
 function nowIso() { return new Date().toISOString(); }
 
 /**
- * Build an envelope. Missing fields are reported explicitly — never papered over with defaults.
+ * 造一个信封。缺的当场说清楚缺哪样 —— 不许默默填一个默认值糊过去。
  *
  * @param {object} o
- * @param {string} o.trace_id      identity of one message, from inbound through box to outbound
- * @param {string} [o.role]        user (into the box) / assistant (out of the box), default user
+ * @param {string} o.trace_id      一条消息的身份证，贯穿入站→盒子→出站
+ * @param {string} [o.role]        user（进盒子）/ assistant（出盒子），默认 user
  * @param {object} o.source        { kind, producer, platform, chat_id, sender_id, native_id }
- *   kind is one of user/system/box; producer is free text the bridge doesn't interpret
- * @param {object} [o.target]      { person, platform, chat_id, policy } — resolved destination
+ *   kind 只有三类（user/system/box）；producer 是自由文本，桥不认识它的值
+ * @param {object} [o.target]      { person, platform, chat_id, policy } —— 路由解析出来的落点
  * @param {object} o.payload       { text, media[] }
- * @param {string} [o.identity]    resolved identity; "unknown" is never delivered
+ * @param {string} [o.identity]    认出来是谁；认不出就是 unknown（**不投递**）
  * @param {string} [o.verdict]
- * @param {string[]} [o.processing] processing applied: none/decrypted/transcribed/vision/acoustic
- * @param {number|null} [o.seq]    sequence number, assigned by the gate at delivery time
- * @param {object} [o.cold]        { write:boolean, text?:string } whether/how it goes into the cold layer
+ * @param {string[]} [o.processing] 做过哪些加工：none/decrypted/transcribed/vision/acoustic
+ * @param {number|null} [o.seq]    编号，闸在「投递给他」那一刻发
+ * @param {object} [o.cold]        { write:boolean, text?:string } 这条进不进冷层、进的时候正文长什么样
  */
 function makeEnvelope({
   trace_id, role = "user", source, target = null, payload,
@@ -66,7 +70,7 @@ function makeEnvelope({
     seq,
     source: {
       kind: (source && source.kind) || "user",
-      // who pushed it (free text, carried through unchanged)
+      // 谁推的（晨笺/提醒/…）。自由文本，桥只原样带着走。
       producer: (source && source.producer) || "",
       platform: (source && source.platform) || "",
       chat_id: (source && source.chat_id) || "",
@@ -93,7 +97,7 @@ function makeEnvelope({
 }
 
 /**
- * Validation. Only rejects things that are definitely wrong, not matters of taste.
+ * 体检。挡住的都是**一定错**的，不是口味问题。
  */
 function assertEnvelope(e) {
   if (!e || typeof e !== "object") throw new Error("信封不是个对象");
@@ -103,15 +107,15 @@ function assertEnvelope(e) {
     throw new Error("信封要说清楚这一轮打哪来（source.kind 只有 " + KINDS.join(" / ") + "）");
   }
   if (!VERDICTS.includes(e.verdict)) throw new Error("verdict 只能是 " + VERDICTS.join(" / "));
-  // Real-channel input must carry a platform identity. Never identify by nickname:
-  // nicknames change and collide.
+  // 真实渠道来的必须带平台身份 —— **绝不用昵称认人**（昵称可改、可重名，
+  // 而采集器会把每一行都硬标成同一个昵称，等于谁说的都算她说的）。
   if (e.source.kind === "user" && !String(e.source.sender_id || "").trim()) {
-    throw new Error("这一轮用户消息没有 sender_id —— 认不出人就不许投递，绝不硬填成 owner");
+    throw new Error("她发来的这一轮没有 sender_id —— 认不出人就不许投递，绝不硬填成她");
   }
   const hasText = String(e.payload && e.payload.text || "").trim().length > 0;
   const hasMedia = Array.isArray(e.payload && e.payload.media) && e.payload.media.length > 0;
-  // Empty turns must not enter the box: the model would invent what was said.
-  // Failed-verification turns may be empty — they are rendered as "unreadable message".
+  // 空轮不许进盒子：他会自己脑补她说了什么（7 月那批幻觉入站就是这么来的）。
+  // 但**验收没过**的那种可以空 —— 那种要照实告诉他「这是一条读不出来的消息」。
   if (!hasText && !hasMedia && e.verdict === "accepted") {
     throw new Error("空轮（既没正文也没媒体）—— 要么是上游取值出错，要么该标 no_content");
   }
@@ -119,10 +123,10 @@ function assertEnvelope(e) {
 }
 
 /**
- * Persisted log shape: versioned, without the body.
+ * 落盘形状（日志用）。**带版本号，不带正文。**
  *
- * The body lives only in the cold layer (`forCold`); the log points to it by id. Storing the
- * body twice invites inconsistency and bloats the log.
+ * 正文只在冷层有一份（`forCold`），这里只放指向它的 id ——
+ * 两份都存正文的话，改一份另一份就不一致了，而且日志会白白大一圈。
  */
 function forLog(e, extra = {}) {
   return {
@@ -141,23 +145,23 @@ function forLog(e, extra = {}) {
     verdict: e.verdict,
     processing: e.processing,
     target: e.target,
-    /** points to the cold record, which holds the body */
+    /** 指向冷层那一条；正文去那儿取 */
     cold_id: e.cold && e.cold.write === false ? null : coldId(e),
     ...extra,
   };
 }
 
-/** Cold record id; the log points to it. */
+/** 冷层记录的 id，日志靠它指过去。 */
 function coldId(e) {
   return "cold-" + e.trace_id + "-" + e.role;
 }
 
 /**
- * Pure cold-layer shape — exactly four fields, never more.
+ * 纯冷层形状 —— **只有四样，一个字段都不许加**（铁律 4）。
  *
- * Cold records are used for memory lookup and may be replayed into a new session; any
- * technical field would leak into the agent's context. Markers such as "not delivered" go
- * into the log (`forLog`), never into the body.
+ * 这份是给他查记忆、给 forge 塞回会话文件用的。混进技术字段，forge 就得先剥一遍；
+ * 剥不干净，他上下文里就会冒出 `schema_version: 1` 这种噪音。
+ * 「这条没发出去」之类的标记一律进日志（`forLog`），**不写进正文**。
  */
 function forCold(e) {
   return {
@@ -168,7 +172,7 @@ function forCold(e) {
   };
 }
 
-/** The only fields allowed in a cold record. Tests use this as a guard. */
+/** 冷层记录允许出现的字段，就这四个。测试拿它当守卫。 */
 const COLD_FIELDS = Object.freeze(["id", "role", "at", "text"]);
 
 module.exports = {

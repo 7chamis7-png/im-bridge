@@ -1,0 +1,22 @@
+{
+  "_说明": "Iris的工具配置 —— 放到 /root/.iris-gate/tools.json。能共享的全给，数据全落他自己的目录；号类只用他自己的钥匙（没有就不挂）。",
+  "_STATE_DIR": "提议 /root/.iris（对标Nova的 /root/.nova）。没用 /root/.iris-gate/state：那是桥自己的（sessions.json / codex-thread.json），daily 会把 <STATE_DIR>/sessions.json 当老格式会话绑定来读，撞名。上线前 mkdir -p /root/.iris。",
+  "_专属记忆": "lmc5 / stmem / stmem-may / ib-sign 是Nova的记忆系统，这里不给位置 = 不挂。他自己的磐石（stmem）还在 /root/.codex/config.toml 里，codex 照旧会起，桥不碰。",
+  "_skipHeavy": "codex 没有按需取件，每个工具的说明书每轮都带着。heavy 的（说明书 >1.5 万字符：taibu 5.5 万 / crotown 2.4 万 / garden 2.2 万 / browser 2 万）先摘掉；garden 是他自己的号，单独开着。要哪个就在 servers 里给它 enabled:true，全要就把 skipHeavy 改 false。",
+  "persona": "iris",
+  "personaFile": "/root/iris/Iris.md",
+  "_personaFile": "他的人格文件。目录改名（scripts/rename-iris-dir.js）之前这个路径不存在 —— 那时 cli-host 会大声告警并退回让 codex 自己读工作目录里的 AGENTS.md（老样子），不会起空壳。改名当天把 AGENTS.md 改成 Iris.md。",
+  "vars": {
+    "STATE_DIR": "/root/.iris",
+    "WORKSPACE": "/root/telegram-nova-workspace"
+  },
+  "_WORKSPACE": "目录改名后 vars.WORKSPACE 改成 /root/iris（跟 iris-env.sh 的 GATE_WORKSPACE_ROOT / GATE_MEMORY_DIR 一起改）",
+  "secretsFiles": ["/root/.secrets/iris-tools.env"],
+  "skipHeavy": true,
+  "servers": {
+    "garden": {
+      "enabled": true,
+      "_为什么": "heavy 但这是他自己的花园号（machine 781），8-02 起就在用；钥匙 GARDEN_TOKEN 从 /root/.codex/garden.env 的 GALATEA_GARDEN_TOKEN 搬过来。"
+    }
+  }
+}

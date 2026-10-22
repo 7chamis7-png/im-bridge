@@ -1,34 +1,32 @@
-# Tool plugins
+# 工具插件
 
-**One tool per file. Drop a file in this directory and it is loaded; the core
-does not change.**
+**一个工具一个文件，扔进这个目录就生效，核心一行不用改。**
+（2026-09-18 Alice：「以后每个工具都做成插件 用的时候接上就好了 不动核心代码」）
 
-The bridge does not enumerate or validate tool names. Adding a tool = adding a
-file; removing one = deleting the file or setting `enabled: false`.
+跟生产者投递口同一条理念：桥**不枚举、不校验**工具叫什么名字。
+加一个工具 = 加一个文件；不想要了 = 删掉文件或把 `enabled` 写成 false。
 
-## Shape of a plugin
+## 一个插件长什么样
 
 ```js
 module.exports = {
-  name: "reply",                    // tool name: states the intent, never an address
-  description: "…",                 // shown to the agent; say when to use it
+  name: "reply",                    // 工具名。**只说意图，不带地址**
+  description: "……",                // 给他看的，写清楚什么时候该用
   schema: { type: "object", properties: { text: { type: "string" } }, required: ["text"] },
 
-  // one of —
-  intent: "send_text",              // (1) delivery: hand off to outbound (channel/capability/cold log/ledger)
-  async handler(args, ctx) { … },   // (2) action: does its own work, never delivers messages
+  // 二选一 ——
+  intent: "send_text",              // ① 投递类：把活交给出闸（渠道/能力/冷层/账本全归它）
+  async handler(args, ctx) { … },   // ② 干活类：自己做事（读日记、查记忆…），不碰投递
 };
 ```
 
-## Two hard rules
+## 两条硬规矩
 
-1. **Tool names are intents, not addresses.** No `telegram_reply`-style names:
-   choosing a tool must not decide the destination — outbound does. A channel
-   can be requested via the optional `channel` argument:
-   - omitted → outbound replies along this turn's origin
-   - given → honoured, but if that plugin is down or does not support the
-     intent, the failure is reported explicitly; it is never silently rerouted
+1. **工具名是意图，不是地址。** 不许有 `telegram_reply` 这种名字——他挑哪个工具
+   等于在决定发去哪，而那件事归出闸（§0.2）。渠道走**可选参数** `channel`：
+   - 不给 → 出闸按这一轮的来路原路返回
+   - 给了 → 听他的（她让他"往哪哪发一条"时用），但腿不通/不支持要**明说**，绝不静默改投
 
-2. **Delivery plugins never send by themselves.** No direct platform API calls
-   in a handler. Tools that send directly bypass routing, the cold log and the
-   ledger, so the bridge would not know the agent said anything.
+2. **投递类插件不许自己发。** 不许在 handler 里直连平台 API。老桥那 11 个工具就是
+   自己发的，结果是：渠道靠猜（切桥当天她在微信说话、他的语音发去了 TG），
+   而且桥完全不知道他说过话——不进冷层、不进账本，一换舱就失忆。

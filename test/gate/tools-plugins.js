@@ -1,6 +1,6 @@
 "use strict";
 /**
- * Tool plugins: every tool is a file in the directory; no core changes needed to add one.
+ * 工具插件（2026-09-18 Alice：「每个工具都做成插件 用的时候接上就好了 不动核心代码」）
  *
  * 验两件事：扔进目录就生效；**两条硬规矩挡得住**——
  *   1. 工具名是意图不是地址（telegram_reply 那种不许重新长出来）
@@ -25,7 +25,7 @@ console.log("[1] 现役这几个装得上");
     ["call", "hang_up", "react", "reply", "send_file", "send_image", "send_sticker", "send_voice"]);
   check("没有装不上的", r.errors, []);
   check("每个都说清了意图", r.list.every((t) => t.intent && !t.handler), true);
-  check("都带 channel 可选参数（用户指定渠道时用）",
+  check("都带 channel 可选参数（她让他发哪儿时用）",
     r.list.every((t) => t.schema.properties.channel), true);
   check("channel 不是必填（不给就原路返回）",
     r.list.every((t) => !(t.schema.required || []).includes("channel")), true);

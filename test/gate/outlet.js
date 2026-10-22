@@ -1,11 +1,11 @@
 "use strict";
 /**
- * Outlet: the bridge's single "send this" entry point.
+ * 投递口（2026-09-18）—— 桥对外唯一的那个口
  *
- * Three guards:
- *   - there is no "recipient" parameter at all
- *   - the bridge does not know caller names (tools can be renamed/removed freely)
- *   - unsupported channel-specific args are reported and recorded, never dropped
+ * 三条守卫：
+ *   · 这个口上**没有「发给谁」这个参数**（铁律 2 / §0.2）
+ *   · 桥不认识调用者叫什么（工具名改了、删了，桥一行不用动）
+ *   · 给不了的专属参数**必须明说并留痕**，不许悄悄丢
  */
 const fs = require("fs");
 const os = require("os");
@@ -25,7 +25,7 @@ const check = (n, got, want) => {
 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-outlet-"));
-const OWNER_ID = "10001";
+const HER = "1000000001";
 
 function build(dir, channel = "telegram") {
   const store = new GateStore({ root: path.join(root, dir) });
@@ -40,10 +40,10 @@ function build(dir, channel = "telegram") {
   const plugins = new Map([[channel, plugin]]);
   const outbound = new OutboundGate({ store, cold, plugins });
   const inbound = makeEnvelope({
-    trace_id: "tr-in", source: { kind: "user", platform: channel, chat_id: OWNER_ID, sender_id: OWNER_ID },
-    payload: { text: "在吗" }, identity: "owner",
+    trace_id: "tr-in", source: { kind: "user", platform: channel, chat_id: HER, sender_id: HER },
+    payload: { text: "在吗" }, identity: "alice",
   });
-  const router = makeRouter({ preferred: { platform: channel, chat_id: OWNER_ID } });
+  const router = makeRouter({ preferred: { platform: channel, chat_id: HER } });
   router.noteInbound(inbound);
   const outlet = makeOutlet({
     outbound, router, plugins,
@@ -58,11 +58,11 @@ function build(dir, channel = "telegram") {
     const { outlet, got } = build("a");
     const r = await outlet.deliver({ intent: "send_text", text: "七点二十" });
     check("发出去了", r.outcome, "sent");
-    check("落点是路由定的", got[0].chatId, OWNER_ID);
+    check("落点是路由定的", got[0].chatId, HER);
     check("走的是原路那一档", r.policy, "reply_route");
   }
 
-  console.log("\n[2] 调用方硬塞落点 —— 丢掉，但留一笔「agent 试过」");
+  console.log("\n[2] 调用方硬塞落点 —— 丢掉，但留一笔「他试过」");
   {
     const { outlet, got } = build("b");
     const r = await outlet.deliver({
@@ -70,20 +70,20 @@ function build(dir, channel = "telegram") {
       args: { chat_id: "别人", channel: "wechat", to: "谁谁谁" },
       by: "tool",
     });
-    check("还是发回 owner 那儿", got[0].chatId, OWNER_ID);
+    check("还是发回她那儿", got[0].chatId, HER);
     check("不是发去「别人」", got[0].chatId === "别人", false);
-    check("留了一笔 agent 试过指定渠道", r.notes.some((n) => n.type === "routing_arg_ignored"), true);
+    check("留了一笔他试过指定渠道", r.notes.some((n) => n.type === "routing_arg_ignored"), true);
   }
 
   console.log("\n[3] 桥不认识调用者叫什么名字");
   {
     const { outlet } = build("c");
-    const a = await outlet.deliver({ intent: "send_text", text: "一", by: "agent_telegram_reply" });
+    const a = await outlet.deliver({ intent: "send_text", text: "一", by: "nova_telegram_reply" });
     const b = await outlet.deliver({ intent: "send_text", text: "二", by: "随便什么还没起名的工具" });
     check("旧名字能发", a.outcome, "sent");
     check("没听说过的名字一样能发", b.outcome, "sent");
     const src = fs.readFileSync(path.join(__dirname, "..", "..", "src", "gate", "outlet.js"), "utf8");
-    check("投递口代码里没有任何工具名", /agent_telegram_reply|tg_buttons|tg_reply_to|"send_image"/.test(src), false);
+    check("投递口代码里没有任何工具名", /cyberboss_/.test(src), false);
   }
 
   console.log("\n[4] 给不了的专属参数：正文照发，但必须明说 + 留痕");
@@ -98,7 +98,7 @@ function build(dir, channel = "telegram") {
     check("**明说按钮没出去**", r.unsupportedExtras.map((n) => n.name), ["inline_keyboard"]);
     check("说得出哪条腿才有", r.unsupportedExtras[0].honoredBy.includes("telegram"), true);
     const last = fs.readFileSync(coldFile, "utf8").trim().split("\n").map((l) => JSON.parse(l)).pop();
-    // The note goes to the event log, not the archived text - the archive holds only what the agent said.
+    // 2026-09-18：留痕在**日志**，不在冷层正文 —— 冷层只存他真说的那句（SPEC §6）。
     check("冷层正文干净", last.text, "今晚吃啥");
     const log = fs.readFileSync(path.join(storeRoot, "events.jsonl"), "utf8")
       .trim().split("\n").map((l) => JSON.parse(l));
@@ -119,7 +119,7 @@ function build(dir, channel = "telegram") {
     check("没有「给不了」的报告", r.unsupportedExtras.length, 0);
   }
 
-  console.log("\n[6] 没有落点时：告诉调用方没发出去，不许让 agent 以为发了");
+  console.log("\n[6] 没有落点时：告诉调用方没发出去，不许让他以为发了");
   {
     const store = new GateStore({ root: path.join(root, "f") });
     const cold = new ColdWriter({ file: path.join(root, "f", "cold.jsonl") });
@@ -136,19 +136,20 @@ function build(dir, channel = "telegram") {
     check("人话里说的是「没发出去」", /没发出去/.test(outlet.describe(r)), true);
   }
 
-  console.log("\n[7] 没有正文 ≠ agent 选择不说 —— 贴纸/图/语音本来就没有正文");
+  console.log("\n[7] 没有正文 ≠ 他选择不说 —— 贴纸/图/语音本来就没有正文");
   {
-    // Empty text must not be treated as "chose silence" for sticker/image/voice/file/react
-    // intents; otherwise the send never reaches the plugin.
+    // 2026-09-18 她问「但他要选发哪个贴纸呀」问出来的洞：
+    // 出闸第一行把空正文一律判成沉默，贴纸根本走不到插头，
+    // 冷层还记了一条「本轮未回复」——他以为发了，她那头什么也没有。
     for (const intent of ["send_sticker", "send_generated_image", "send_voice", "send_file", "react"]) {
       const { outlet, got } = build("g-" + intent, "telegram");
-      // make the plugin support this intent
+      // 让插头认这个意图
       const r = await outlet.deliver({ intent, text: "", args: { sticker: "笑哭", filePath: "/tmp/x", message_id: 9 } });
       const reached = got.length > 0;
       check(`${intent}：空正文没被当成沉默`, r.outcome !== "silent", true);
       check(`${intent}：真走到插头了（或明确说不了）`, reached || r.outcome === "blocked", true);
     }
-    // but send_text with no text is still silence
+    // 但发文字没正文，仍然是沉默 —— 这条不能改坏
     const { outlet: o2 } = build("g-text", "telegram");
     const rt = await o2.deliver({ intent: "send_text", text: "   " });
     check("发文字没正文 → 还是沉默（§0.3 不许动）", rt.outcome, "silent");

@@ -13,35 +13,37 @@ const DEFAULT_BASE_URL = "https://api.openai.com/v1";
 const DEFAULT_MODEL = "whisper-1";
 
 
-// Local whisper fallback, used when the remote API is unavailable or fails.
-// Requires the `openai-whisper` Python package.
-//   AGENT_TRANSCRIPTION_LOCAL=false            disable the fallback
-//   AGENT_TRANSCRIPTION_LOCAL_MODEL            whisper model name (default: small;
-//                                              noticeably more accurate than base
-//                                              for short, noisy clips)
-//   AGENT_TRANSCRIPTION_PYTHON                 interpreter (default: python3)
-//   AGENT_TRANSCRIPTION_LOCAL_PROMPT           initial_prompt hint
-//   AGENT_TRANSCRIPTION_LOCAL_TIMEOUT_MS       default 180000
-//   AGENT_TRANSCRIPTION_LANGUAGE               forced language, API and local (default: zh)
+// 2026-08-29 Keeper：本地 whisper 兜底。
+// 搬到德国后发现转写全线 503 → 查出来是两件事叠一起：
+//   ① 硅基流动的 FunAudioLLM/SenseVoiceSmall 服务端挂了（洛杉矶也 503，跟搬家无关）
+//   ② 换成 Qwen/Qwen3-ASR-1.7B 洛杉矶 1.5 秒就好，但【德国连不通】——
+//      TCP 能连上、GET 模型列表也通，一上传文件就卡死到超时。MTU 排除过（1472 字节能过）。
+//      结论是它对境外 IP 的上传端点不通，不是我们能修的。
+// 所以：API 失败就转本地。模型早就在 /root/.cache/whisper（base.pt / small.pt），
+// 纯 CPU，四秒的语音大概几秒出字，比"没有字"强得多。
+// 关掉本地兜底：NOVA_TRANSCRIPTION_LOCAL=false
 async function transcribeLocally(audioPath) {
-  if (String(process.env.AGENT_TRANSCRIPTION_LOCAL || "true").toLowerCase() === "false") {
+  if (String(process.env.NOVA_TRANSCRIPTION_LOCAL || "true").toLowerCase() === "false") {
     return "";
   }
-  const model = normalizeText(process.env.AGENT_TRANSCRIPTION_LOCAL_MODEL) || "small";
-  const language = normalizeText(process.env.AGENT_TRANSCRIPTION_LANGUAGE) || "zh";
-  const py = normalizeText(process.env.AGENT_TRANSCRIPTION_PYTHON) || "python3";
-  const localPrompt = normalizeText(process.env.AGENT_TRANSCRIPTION_LOCAL_PROMPT)
+  // small 比 base 慢一倍(12.6s vs 5.6s)但准得多：
+  // base 把"字幕"听成"自我"、"彩蛋"听成"采代"，small 全对。
+  // 她的语音本来就带哼带气，听岔了还不如不听 —— 所以默认吃这个时间。
+  const model = normalizeText(process.env.NOVA_TRANSCRIPTION_LOCAL_MODEL) || "small";
+  const language = normalizeText(process.env.NOVA_TRANSCRIPTION_LANGUAGE) || "zh";
+  const py = normalizeText(process.env.NOVA_TRANSCRIPTION_PYTHON) || "python3";
+  const localPrompt = normalizeText(process.env.NOVA_TRANSCRIPTION_LOCAL_PROMPT)
     || "以下是普通话的简体中文语音内容。";
   const script = [
     "import sys, json, whisper",
     `m = whisper.load_model(${JSON.stringify(model)})`,
-    // initial_prompt steers script/vocabulary (e.g. without it whisper may emit
-    // Traditional instead of Simplified Chinese).
+    // initial_prompt 是给 whisper 的口音/字形提示：不写它会吐繁体，
+    // 而且把"字幕"这类词听岔（实测 base 模型 5.7 秒，质量够用不够好）。
     `r = m.transcribe(sys.argv[1], language=${JSON.stringify(language)}, fp16=False, initial_prompt=${JSON.stringify(localPrompt)})`,
     "print(json.dumps({'text': r.get('text','')}, ensure_ascii=False))",
   ].join("\n");
   const { stdout } = await execFileAsync(py, ["-c", script, audioPath], {
-    timeout: Number(process.env.AGENT_TRANSCRIPTION_LOCAL_TIMEOUT_MS) || 180000,
+    timeout: Number(process.env.NOVA_TRANSCRIPTION_LOCAL_TIMEOUT_MS) || 180000,
     maxBuffer: 8 * 1024 * 1024,
   });
   const line = String(stdout || "").trim().split("\n").pop();
@@ -56,20 +58,20 @@ async function transcribeAudioFile(filePath, options = {}) {
 
   const apiKey = normalizeText(
     options.apiKey
-    || process.env.AGENT_TRANSCRIPTION_API_KEY
+    || process.env.NOVA_TRANSCRIPTION_API_KEY
     || process.env.OPENAI_API_KEY
   );
   if (!apiKey) {
-    // No API key: try the local fallback before giving up.
+    // 没配 key 不再直接抛：先看本地能不能顶上
     const local = await transcribeLocally(normalizedPath).catch(() => "");
     if (local) return local;
-    throw new Error("Missing AGENT_TRANSCRIPTION_API_KEY or OPENAI_API_KEY");
+    throw new Error("Missing NOVA_TRANSCRIPTION_API_KEY or OPENAI_API_KEY");
   }
 
-  const baseUrl = normalizeText(options.baseUrl || process.env.AGENT_TRANSCRIPTION_BASE_URL) || DEFAULT_BASE_URL;
-  const model = normalizeText(options.model || process.env.AGENT_TRANSCRIPTION_MODEL) || DEFAULT_MODEL;
-  // Force the language so short/breathy clips are not misdetected.
-  const language = normalizeText(options.language || process.env.AGENT_TRANSCRIPTION_LANGUAGE) || "zh";
+  const baseUrl = normalizeText(options.baseUrl || process.env.NOVA_TRANSCRIPTION_BASE_URL) || DEFAULT_BASE_URL;
+  const model = normalizeText(options.model || process.env.NOVA_TRANSCRIPTION_MODEL) || DEFAULT_MODEL;
+  // Force language so Whisper does not misdetect short/breathy Chinese clips as ja/en.
+  const language = normalizeText(options.language || process.env.NOVA_TRANSCRIPTION_LANGUAGE) || "zh";
   let audioPath = normalizedPath;
   let tmpFile = null;
   try {
@@ -78,7 +80,7 @@ async function transcribeAudioFile(filePath, options = {}) {
     await fh.read(header, 0, 7, 0);
     await fh.close();
     if (header.slice(0, 7).equals(SILK_MAGIC)) {
-      tmpFile = path.join(os.tmpdir(), `im-bridge-silk-${Date.now()}.mp3`);
+      tmpFile = path.join(os.tmpdir(), `cyberboss-silk-${Date.now()}.mp3`);
       const pcmFile = tmpFile.replace(".mp3", ".pcm");
       await execFileAsync("python3", ["-c",
         `import pilk; pilk.decode(${JSON.stringify(normalizedPath)}, ${JSON.stringify(pcmFile)})`
@@ -102,7 +104,7 @@ async function transcribeAudioFile(filePath, options = {}) {
     path.basename(audioPath)
   );
 
-  const apiTimeoutMs = Number(process.env.AGENT_TRANSCRIPTION_API_TIMEOUT_MS) || 45000;
+  const apiTimeoutMs = Number(process.env.NOVA_TRANSCRIPTION_API_TIMEOUT_MS) || 45000;
   let apiError = null;
   try {
     const response = await fetch(`${baseUrl.replace(/\/+$/g, "")}/audio/transcriptions`, {
@@ -124,13 +126,13 @@ async function transcribeAudioFile(filePath, options = {}) {
     apiError = error;
   }
 
-  // Remote gave no text: fall back to local so the voice message is not lost.
+  // 走到这儿说明远端没给出字：转本地，别让她的语音变成一片空白
   const local = await transcribeLocally(audioPath).catch((error) => {
-    console.error(`[transcription] local fallback failed too: ${error.message}`);
+    console.error(`[transcription] 本地兜底也失败: ${error.message}`);
     return "";
   });
   if (local) {
-    console.warn(`[transcription] remote failed (${apiError?.message?.slice(0, 80)}), used local whisper`);
+    console.warn(`[transcription] 远端失败(${apiError?.message?.slice(0, 80)})，已用本地 whisper 顶上`);
     return local;
   }
   throw apiError;

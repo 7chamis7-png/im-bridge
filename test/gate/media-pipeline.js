@@ -1,8 +1,7 @@
 "use strict";
 /**
- * Media pipeline: plugins only hand in bytes, the shared layer does the rest.
- * Most important: images are passed as originals for the model to look at;
- * captioning is only a fallback for runtimes that cannot take images.
+ * 媒体流水线：插头只交字节，剩下全归共用层。
+ * 最要紧的一条：**图片默认递原图给他自己看**，识图只是运行时吃不下图时的兜底。
  */
 const fs = require("fs");
 const os = require("os");
@@ -31,7 +30,7 @@ function mk({ native = true, withVision = true, withTranscribe = true } = {}) {
 }
 
 (async () => {
-  console.log("\n[1] 图片：模型自己会看 —— 递原图，不调识图、不花钱");
+  console.log("\n[1] 图片：他自己会看 —— 递原图，不调识图、不花钱");
   const a = await mk().ingest({ kind: "image", bytes: PNG, channel: "wechat" });
   check("processed=native", a.processed, "native");
   check("给了要递上去的附件", Array.isArray(a.attach) && a.attach.length === 1, true);
@@ -50,7 +49,7 @@ function mk({ native = true, withVision = true, withTranscribe = true } = {}) {
   check("标出缺哪一样", c.failed, "capability_missing");
   check("文件照样存着（以后补看得回来）", fs.existsSync(c.filePath), true);
 
-  console.log("\n[4] 语音：音频模型吃不下，转写是唯一的路");
+  console.log("\n[4] 语音：音频他吃不下，转写是唯一的路");
   const d = await mk().ingest({ kind: "voice", bytes: AMR, channel: "wechat" });
   check("processed=transcribe", d.processed, "transcribe");
   check("正文带稿", d.text, "[语音] 你吃饭了没");
@@ -76,10 +75,10 @@ function mk({ native = true, withVision = true, withTranscribe = true } = {}) {
     check("说了什么在第一行", g5.text.split("\n")[0], "[语音] 你吃饭了没");
     check("怎么说的拼在第二行", /呻吟感0\.8/.test(g5.text.split("\n")[1] || ""), true);
     check("声学结果也单独留字段", /呻吟感/.test(g5.acoustic || ""), true);
-    // acoustic failure: transcript unaffected, no acoustic line
+    // 声学炸了：转写照常，正文不带声学行
     const caps4 = new Capabilities();
     caps4.register("transcribe", async () => ({ text: "你吃饭了没" }));
-    caps4.register("acoustic", async () => { throw new Error("analyzer 挂了"); });
+    caps4.register("acoustic", async () => { throw new Error("north_ear 挂了"); });
     const store4 = new FileStore({ root: fs.mkdtempSync(path.join(root, "s4-")) });
     const g6 = await new MediaPipeline({ caps: caps4, fileStore: store4 }).ingest({ kind: "voice", bytes: AMR, channel: "wechat" });
     check("声学挂了转写照常成功", g6.processed, "transcribe");
@@ -128,7 +127,7 @@ function mk({ native = true, withVision = true, withTranscribe = true } = {}) {
 
     const bad = await mp.ingest({ kind: "sticker", url: "http://x/y.jpg", expectMd5: "bad", channel: "wechat" });
     check("md5 对不上就拒收", bad.failed, "fetch");
-    check("说清楚是下载失败，不是 owner 没发", /下载失败/.test(bad.text), true);
+    check("说清楚是下载失败，不是她没发", /下载失败/.test(bad.text), true);
     check("坏的不落仓", bad.filePath, "");
 
     const noCap = new MediaPipeline({ caps: new Capabilities(), fileStore: new FileStore({ root: fs.mkdtempSync(path.join(root, "n-")) }) });
@@ -136,18 +135,84 @@ function mk({ native = true, withVision = true, withTranscribe = true } = {}) {
     check("下载能力没注册也说人话", nc.failed, "capability_missing");
   }
 
-  console.log("\n[11] 微信动画表情：XML 里就有明文直链");
+  console.log("\n[11] 微信动画表情：XML 里就有明文直链（2026-09-17 实测 md5 对得上）");
   {
     const { parseEmoji } = require("../../src/gate/plugins/wechat");
     const XML = `<msg><emoji md5="2a952eea0187d5c29d5637dd5355b261" len="59556" `
       + `cdnurl="http://vweixinf.tc.qq.com/110/20401/stodownload?m=2a95&amp;ef=1" `
       + `encrypturl="http://vweixinf.tc.qq.com/110/20402/stodownload?m=fe62&amp;ef=2" `
-      + `aeskey="77ecc91864e2433cb1aca0ede7862e2b" /></msg>`;
+      + `aeskey="0123456789abcdef0123456789abcdef" /></msg>`;
     const e = parseEmoji(XML);
     check("取的是明文那份 cdnurl(ef=1)，不是 encrypturl", /ef=1/.test(e.url), true);
     check("&amp; 解回 &（不然链接是坏的）", e.url.includes("&ef=1"), true);
     check("带上 md5 当校验", e.md5, "2a952eea0187d5c29d5637dd5355b261");
     check("带上 len 当校验", e.len, 59556);
+  }
+
+  console.log("\n[12] hydrate() 重试：voice_blob_missing/image_not_downloaded 是「还没到」不是「拿不到」");
+  {
+    // 2026-10-21：Nova报微信语音连中两次「voice_blob_missing」，翻事件记录数出来的
+    // 根因——采集器读到消息比语音本体同步进本地库快，隔几秒重试大概率就有了。
+    const mkPlugin = (failsThenOk, failCode = "voice_blob_missing") => {
+      let calls = 0;
+      return {
+        calls: () => calls,
+        async fetchMedia() {
+          calls++;
+          if (calls <= failsThenOk) return { bytes: null, failed: failCode };
+          return { bytes: AMR, hintName: "v.amr" };
+        },
+      };
+    };
+
+    // 第一次没有，第二次重试就有了 —— 该把 item.retried 记成 1，正文是正常转写，不是「取不到」
+    {
+      const caps = new Capabilities();
+      caps.register("transcribe", async () => ({ text: "你吃饭了没" }));
+      const mp = new MediaPipeline({
+        caps, fileStore: new FileStore({ root: fs.mkdtempSync(path.join(root, "r1-")) }),
+        retryDelaysMs: [5, 5],
+      });
+      const plugin = mkPlugin(1);
+      const delivery = { channel: "wechat", receivedAt: new Date().toISOString(),
+        media: [{ kind: "voice", serverId: "123" }] };
+      await mp.hydrate(delivery, plugin);
+      check("重试一次就拿到了，没留 failed", delivery.media[0].failed, undefined);
+      check("记了重试次数", delivery.media[0].retried, 1);
+      check("正文是正常转写，不是“取不到”", delivery.media[0].text, "[语音] 你吃饭了没");
+      check("确实调了两次 fetchMedia", plugin.calls(), 2);
+    }
+
+    // 重试次数耗尽还是没有 —— 照实说取不到，不能假装成功
+    {
+      const caps = new Capabilities();
+      const mp = new MediaPipeline({
+        caps, fileStore: new FileStore({ root: fs.mkdtempSync(path.join(root, "r2-")) }),
+        retryDelaysMs: [5, 5],
+      });
+      const plugin = mkPlugin(99); // 一直失败
+      const delivery = { channel: "wechat", receivedAt: new Date().toISOString(),
+        media: [{ kind: "voice", serverId: "456" }] };
+      await mp.hydrate(delivery, plugin);
+      check("重试耗尽还是失败，照实标出来", delivery.media[0].failed, "voice_blob_missing");
+      check("正文说清取不到", /取不到/.test(delivery.media[0].text), true);
+      check("重试了该重试的次数后才放弃（1 次首试 + 2 次重试）", plugin.calls(), 3);
+    }
+
+    // 不在白名单里的 failed 码（比如解码失败）不重试，省得对着修不好的东西干等
+    {
+      const caps = new Capabilities();
+      const mp = new MediaPipeline({
+        caps, fileStore: new FileStore({ root: fs.mkdtempSync(path.join(root, "r3-")) }),
+        retryDelaysMs: [5, 5],
+      });
+      const plugin = mkPlugin(99, "voice_decode_failed");
+      const delivery = { channel: "wechat", receivedAt: new Date().toISOString(),
+        media: [{ kind: "voice", serverId: "789" }] };
+      await mp.hydrate(delivery, plugin);
+      check("不在重试名单里的失败码，一次就放弃", plugin.calls(), 1);
+      check("照实标出真实的失败码", delivery.media[0].failed, "voice_decode_failed");
+    }
   }
 
   console.log(`\n通过 ${pass} / 失败 ${fail}   (隔离目录 ${root})`);

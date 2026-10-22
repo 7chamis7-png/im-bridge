@@ -1,8 +1,7 @@
 "use strict";
-// Model fallback alert: requested-vs-actual episode state machine, the separate
-// session-limit gate, and reading the requested model from sessions.json (a
-// runtime /model switch must not be mistaken for a fallback).
-// Uses a fake notify; state lives in a temp dir (also covers "no re-alert after restart").
+// 掉档提醒（2026-09-21，9-21 审后补）：requested vs actual model 的 episode 状态机 +
+// 额度用完那道独立闸 + 「请求的模型」现读 sessions.json（/model 热切不许被误判成掉档）。
+// 假 notify，不真发 telegram；状态落临时目录，验重启不重推那条也在这儿测。
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
@@ -151,11 +150,11 @@ function writeSessions(file, { bindingKey, workspaceRoot, model, runtimeId = "cl
 })();
 
 (() => {
-  console.log("[10] 请求模型现读 sessions.json：owner 主动切模型不该被当成掉档");
+  console.log("[10] 请求模型现读 sessions.json：她主动切模型不该被当成掉档");
   const dir = tmpDir("live-model-");
   const sessionsFile = path.join(dir, "sessions.json");
   const stateFile = path.join(dir, "state.json");
-  const bindingKey = "b1", workspaceRoot = "/srv/agent-workspace";
+  const bindingKey = "b1", workspaceRoot = "/root/nova";
   writeSessions(sessionsFile, { bindingKey, workspaceRoot, model: "claude-fable-5[1m]" });
   const sent = [];
   const alerter = makeModelFallbackAlert({
@@ -167,10 +166,10 @@ function writeSessions(file, { bindingKey, workspaceRoot, model, runtimeId = "cl
   check("请求 fable、答的也是 fable，不吭声", sent.length === 0);
 
   alerter.onModelObserved({ actual: "claude-opus-5", turnId: "b2" });
-  check("没人切过模型，安全层/容量把 agent 路由去了 opus —— 这是真掉档，推了", sent.length === 1);
+  check("没人切过模型，安全层/容量把他路由去了 opus —— 这是真掉档，推了", sent.length === 1);
   check("状态记成 fallback", alerter._state().modelStatus === "fallback");
 
-  console.log("[10a] owner /model 切到 opus（正好是当前 fallback 那个）：sessions.json 先变，onModelCommand 悄悄收，不推");
+  console.log("[10a] 她 /model 切到 opus（正好是当前 fallback 那个）：sessions.json 先变，onModelCommand 悄悄收，不推");
   writeSessions(sessionsFile, { bindingKey, workspaceRoot, model: "claude-opus-5[1m]" });
   alerter.onModelCommand({ toModel: "claude-opus-5[1m]" });
   check("onModelCommand 之后状态回到 normal", alerter._state().modelStatus === "normal");
@@ -181,7 +180,7 @@ function writeSessions(file, { bindingKey, workspaceRoot, model, runtimeId = "cl
   check("opus 答 opus，正常轮，不推", sent.length === 1);
   check("状态还是 normal", alerter._state().modelStatus === "normal");
 
-  console.log("[10c] owner 又 /model 切回 fable（这会儿不在掉档段，onModelCommand 什么都不用做）");
+  console.log("[10c] 她又 /model 切回 fable（这会儿不在掉档段，onModelCommand 什么都不用做）");
   writeSessions(sessionsFile, { bindingKey, workspaceRoot, model: "claude-fable-5[1m]" });
   alerter.onModelCommand({ toModel: "claude-fable-5[1m]" });
   check("不在掉档段，onModelCommand 空手而归，状态没变", alerter._state().modelStatus === "normal");

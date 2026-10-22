@@ -1,15 +1,16 @@
 "use strict";
 /**
- * The cold layer (conversation log) only records genuine model replies.
+ * 冷层只装真实对话（2026-09-18 Alice：「不是模型真实回复不落冷层」）
  *
- * A CLI-generated refusal ("API Error: ... safeguards flagged ...") must be delivered to the
- * owner but must not be written to the cold layer as an assistant turn: the cold layer may be
- * replayed into a new session as real history, which would plant a fake memory. The same
- * applies to bridge-generated command panels (/status /help /model).
+ * 病历：9-18 京时 23:18，安全层拒答那句「API Error: … safeguards flagged …」
+ * 以 `role:"assistant"` 落进了冷层。换舱 / forge 会把冷层原话当**真实轮**塞回他的
+ * 会话 —— 等于给他造一段「我说过 API Error」的假记忆，而换舱正是安全层黏连的解药。
+ * 同一个口子还漏了 `/status` `/help` `/model` 三张面板（桥自己说的话）。
  *
- * This is a wiring test, not a unit test. Every check has a positive control first (prove the
- * cold layer is writable), then proves the blocked case is blocked - "0 rows" alone could
- * just mean the writer is broken.
+ * ⚠️ **这份测试盯的是接线，不是单元。** 42 个 gate 测试当时全绿，照样漏了这条 ——
+ * 因为它们两头的数据都是自己造的，形状天生一致（记忆 `feedback-wiring-layer-untested`）。
+ * 所以下面每一条都带**阳性对照**：先证明冷层写得进去，再证明该拦的拦住了。
+ * 只看「0 条」会被骗 —— 写手坏了也是 0 条。
  */
 const fs = require("fs");
 const os = require("os");
@@ -20,6 +21,7 @@ const { ColdWriter } = require("../../src/gate/cold-writer");
 const { OutboundGate } = require("../../src/gate/outbound");
 const { makeRouter } = require("../../src/gate/routing");
 const { makeEnvelope } = require("../../src/gate/envelope");
+// 2026-09-20 搬家：判据搬进了新运行时（一字没改），老 claudecode 那套已删。
 const { isSyntheticMessage } = require("../../adapters/box-runtime");
 const { decode } = require("../../runtime/decode");
 
@@ -31,9 +33,9 @@ const check = (n, got, want) => {
 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-cold-real-"));
-const OWNER_ID = "10001";
+const HER = "1000000001";
 
-/** Shape of a CLI-generated refusal as it appears in a transcript (body shortened). */
+/** 9-18 那条拒答在 transcript 里的**真实形状**（信封原样，正文截短）。 */
 const REAL_REFUSAL_MESSAGE = {
   model: "<synthetic>",
   role: "assistant",
@@ -41,7 +43,7 @@ const REAL_REFUSAL_MESSAGE = {
   stop_details: { type: "refusal", category: "cyber" },
   content: [{
     type: "text",
-    text: "API Error: Claude's safeguards flagged this message (https://www.anthropic.com/legal/aup)."
+    text: "API Error: Fable 5's safeguards flagged this message (https://www.anthropic.com/legal/aup)."
       + " Our intentionally broad safeguards allow us to deliver more capabilities faster,"
       + " but can sometimes flag legitimate coding, cybersecurity, and biology tasks.",
   }],
@@ -63,10 +65,10 @@ function build(dir, channel = "telegram") {
   const plugins = new Map([[channel, plugin]]);
   const outbound = new OutboundGate({ store, cold, plugins });
   const inbound = makeEnvelope({
-    trace_id: "tr-in", source: { kind: "user", platform: channel, chat_id: OWNER_ID, sender_id: OWNER_ID },
-    payload: { text: "hello?" }, identity: "owner",
+    trace_id: "tr-in", source: { kind: "user", platform: channel, chat_id: HER, sender_id: HER },
+    payload: { text: "在吗" }, identity: "alice",
   });
-  const router = makeRouter({ preferred: { platform: channel, chat_id: OWNER_ID } });
+  const router = makeRouter({ preferred: { platform: channel, chat_id: HER } });
   router.noteInbound(inbound);
   const outlet = makeOutlet({ outbound, router, plugins, currentTurn: () => ({ turnId: "t1", inbound }) });
   const readCold = () => fs.existsSync(coldFile)
@@ -82,98 +84,100 @@ function build(dir, channel = "telegram") {
 }
 
 (async () => {
-  console.log("[1] the check reads the envelope, not the body text");
+  console.log("[1] 判据长在信封上，不长在正文上（换个文案不许漏）");
   {
-    check("refusal detected", isSyntheticMessage(REAL_REFUSAL_MESSAGE), true);
-    check("null is not synthetic", isSyntheticMessage(null), false);
-    check("model=<synthetic> only", isSyntheticMessage({ model: "<synthetic>" }), true);
-    check("stop_reason=refusal only", isSyntheticMessage({ model: "claude-model-x", stop_reason: "refusal" }), true);
-    check("positive control: a real reply is not synthetic", isSyntheticMessage({ model: "claude-model-x", stop_reason: "end_turn" }), false);
-    // Different wording must still be detected - that is why there is no keyword list.
-    check("different wording still detected", isSyntheticMessage({
-      ...REAL_REFUSAL_MESSAGE, content: [{ type: "text", text: "a completely different error text" }],
+    // 用的是 process-client 里**真的那一份**，不是复刻。
+    check("真实拒答认得出", isSyntheticMessage(REAL_REFUSAL_MESSAGE), true);
+    check("空的不算", isSyntheticMessage(null), false);
+    check("只有 model=<synthetic>", isSyntheticMessage({ model: "<synthetic>" }), true);
+    check("只有 stop_reason=refusal", isSyntheticMessage({ model: "claude-fable-5", stop_reason: "refusal" }), true);
+    check("阳性对照：他真说话不算", isSyntheticMessage({ model: "claude-fable-5", stop_reason: "end_turn" }), false);
+    // 文案改了照样得认出来 —— 这就是不写关键词表的理由
+    check("换了文案照样认（判据不看正文）", isSyntheticMessage({
+      ...REAL_REFUSAL_MESSAGE, content: [{ type: "text", text: "完全不一样的报错文案" }],
     }), true);
   }
 
-  console.log("\n[2] decode flags CLI-generated frames (cliGenerated)");
+  console.log("\n[2] 解帧层把「这是 CLI 自己造的」标出来（cliGenerated）");
   {
-    // The adapter treats a turn as synthetic if either cliGenerated or isSyntheticMessage holds.
+    // 新运行时的同一件事：老的靠 payload.synthetic 透传，现在靠信封上的 cliGenerated
+    // + 上面那个 isSyntheticMessage（适配层 219 行：两个任一成立就算合成）。
     const mk = (extra) => decode({ type: "assistant", message: { role: "assistant", content: [{ type: "text", text: "x" }] }, ...extra })[0];
-    check("frame with CLI error", mk({ error: { message: "AUP" } }).cliGenerated, true);
-    check("frame marked isSynthetic", mk({ isSynthetic: true }).cliGenerated, true);
-    check("positive control: a real reply is not synthetic", mk({}).cliGenerated, false);
-    check("positive control: non-assistant frames are not flagged", decode({ type: "result", isSynthetic: true })[0].cliGenerated, false);
+    check("CLI 报错的帧", mk({ error: { message: "AUP" } }).cliGenerated, true);
+    check("CLI 自己标 isSynthetic 的帧", mk({ isSynthetic: true }).cliGenerated, true);
+    check("阳性对照：他真说话不算", mk({}).cliGenerated, false);
+    check("阳性对照：非 assistant 帧不算", decode({ type: "result", isSynthetic: true })[0].cliGenerated, false);
   }
 
-  console.log("\n[3] outbound: refusal is sent but not written to the cold layer (goes to the event log)");
+  console.log("\n[3] 出闸：拒答照发、但不进冷层（正文改去事件账本）");
   {
     const { outbound, sent, readCold, readEvents, inbound } = build("refusal");
     const refusalText = REAL_REFUSAL_MESSAGE.content[0].text;
 
-    // Positive control: a real reply does reach the cold layer.
+    // 先来一条真回复当**阳性对照** —— 证明这条链路冷层是写得进去的
     await outbound.deliver({
       turnId: "t-good", outputId: "o-good", replyToEventId: inbound.trace_id,
-      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: OWNER_ID, accountId: "" },
-      text: "here, what's up", intent: "send_text",
+      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: HER, accountId: "" },
+      text: "在的 老婆", intent: "send_text",
     });
-    check("positive control: real reply written", readCold().length, 1);
-    check("positive control: text matches", readCold()[0].text, "here, what's up");
-    check("positive control: role is assistant", readCold()[0].role, "assistant");
+    check("阳性对照：真回复进了冷层", readCold().length, 1);
+    check("阳性对照：正文对得上", readCold()[0].text, "在的 老婆");
+    check("阳性对照：role 是 assistant", readCold()[0].role, "assistant");
 
-    // Now the refusal.
+    // 再来那条拒答
     await outbound.deliver({
       turnId: "t-bad", outputId: "o-bad", replyToEventId: inbound.trace_id,
-      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: OWNER_ID, accountId: "" },
+      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: HER, accountId: "" },
       text: refusalText, intent: "send_text",
       cold: { write: false, reason: "not_model_reply" },
     });
-    check("cold layer still has 1 row (refusal not written)", readCold().length, 1);
-    check("no 'safeguards' in the cold layer", readCold().some((r) => r.text.includes("safeguards")), false);
-    // Still delivered - the owner must see that the turn was blocked.
-    check("but the owner received both messages", sent.length, 2);
-    check("the second message is the refusal", sent[1].text.includes("safeguards"), true);
-    // A skip must leave a trace.
+    check("冷层还是只有 1 条（拒答没进去）", readCold().length, 1);
+    check("冷层里搜不到 safeguards", readCold().some((r) => r.text.includes("safeguards")), false);
+    // 照发 —— 她得知道他这轮被挡了
+    check("但她照样收到了（两条都发出去了）", sent.length, 2);
+    check("发出去的第二条就是那句拒答", sent[1].text.includes("safeguards"), true);
+    // 跳过必须留痕，不许悄悄丢
     const skipped = readEvents().filter((e) => e.kind === "cold.skipped");
-    check("event log has cold.skipped", skipped.length, 1);
-    check("trace contains the text", skipped[0].text.includes("safeguards"), true);
-    check("trace records the reason", skipped[0].reason, "not_model_reply");
+    check("事件账本记了 cold.skipped", skipped.length, 1);
+    check("留痕里有原文", skipped[0].text.includes("safeguards"), true);
+    check("留痕说了为什么", skipped[0].reason, "not_model_reply");
   }
 
-  console.log("\n[4] command panels (/status /help /model) are not written - that is the bridge speaking");
+  console.log("\n[4] 命令回执（/status /help /model）不进冷层 —— 那是桥在说话");
   {
     const { outlet, sent, readCold } = build("cmd");
 
-    // Positive control: text sent via the tool path is written.
-    await outlet.deliver({ intent: "send_text", text: "a reply from the agent", by: "tool" });
-    check("positive control: tool text written", readCold().length, 1);
+    // 阳性对照：同一个口子，工具发的正文照进冷层
+    await outlet.deliver({ intent: "send_text", text: "他自己说的话", by: "tool" });
+    check("阳性对照：工具正文进了冷层", readCold().length, 1);
 
-    const r = await outlet.deliver({ intent: "send_text", text: "🧵 session 00000000…\n🤖 model claude-model-x", by: "command" });
-    check("panel was sent to the owner", r.outcome, "sent");
-    check("owner received two messages", sent.length, 2);
-    check("cold layer still has 1 row (panel not written)", readCold().length, 1);
-    check("panel not in the cold layer", readCold().some((c) => c.text.includes("🧵")), false);
+    const r = await outlet.deliver({ intent: "send_text", text: "🧵 会话 6d517aa9…\n🤖 模型 claude-fable-5", by: "command" });
+    check("面板照样发给她了", r.outcome, "sent");
+    check("她收到了两条", sent.length, 2);
+    check("冷层还是 1 条（面板没进去）", readCold().length, 1);
+    check("冷层里搜不到面板", readCold().some((c) => c.text.includes("🧵")), false);
   }
 
-  console.log("\n[5] default: no cold option = write");
+  console.log("\n[5] 默认行为不许被改坏：没说不写 = 照写");
   {
     const { outbound, readCold, inbound } = build("default");
     await outbound.deliver({
       turnId: "t", outputId: "o", replyToEventId: inbound.trace_id,
-      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: OWNER_ID, accountId: "" },
-      text: "no cold option", intent: "send_text",
+      inboundEvent: { eventId: inbound.trace_id, channel: "telegram", chatId: HER, accountId: "" },
+      text: "不带 cold 参数", intent: "send_text",
     });
-    check("no cold option -> written", readCold().length, 1);
+    check("没给 cold → 照写", readCold().length, 1);
 
     const b = build("default2");
     await b.outbound.deliver({
       turnId: "t", outputId: "o", replyToEventId: b.inbound.trace_id,
-      inboundEvent: { eventId: b.inbound.trace_id, channel: "telegram", chatId: OWNER_ID, accountId: "" },
+      inboundEvent: { eventId: b.inbound.trace_id, channel: "telegram", chatId: HER, accountId: "" },
       text: "cold.write=true", intent: "send_text", cold: { write: true },
     });
-    check("explicit write:true -> written", b.readCold().length, 1);
+    check("显式 write:true → 照写", b.readCold().length, 1);
   }
 
-  console.log("\n[6] box -> main loop hop (hand-written field names)");
+  console.log("\n[6] 盒子 → 主循环 那一跳（手写字段名，9-18 五个 bug 里四个的病灶）");
   {
     const { makeClaudeCodeBox } = require("../../src/host/gate-box-claudecode");
     const rt = (() => {
@@ -189,25 +193,25 @@ function build(dir, channel = "telegram") {
     const got = [];
     b.onReply((e) => got.push(e));
     await b.deliver(makeEnvelope({
-      trace_id: "tr-6", source: { kind: "user", platform: "telegram", chat_id: OWNER_ID, sender_id: OWNER_ID },
-      payload: { text: "hello?" }, seq: 1,
+      trace_id: "tr-6", source: { kind: "user", platform: "telegram", chat_id: HER, sender_id: HER },
+      payload: { text: "在吗" }, seq: 1,
     }));
 
-    rt.emit("runtime.turn.completed", { turnId: "t1", threadId: "th-1", text: "here, what's up" });
-    check("positive control: real reply reached the main loop", got.length, 1);
-    check("positive control: genuine=true", got[0].genuine, true);
+    rt.emit("runtime.turn.completed", { turnId: "t1", threadId: "th-1", text: "在的 老婆" });
+    check("阳性对照：真回复到了主循环", got.length, 1);
+    check("阳性对照：genuine=true", got[0].genuine, true);
 
     rt.emit("runtime.turn.completed", {
       turnId: "t1", threadId: "th-1", synthetic: true,
-      text: "API Error: Claude's safeguards flagged this message",
+      text: "API Error: Fable 5's safeguards flagged this message",
     });
-    check("refusal also reached the main loop (still sent)", got.length, 2);
-    check("but genuine=false", got[1].genuine, false);
-    // A mismatched field name fails silently, so pin the name itself.
-    check("field is named genuine", Object.keys(got[1]).includes("genuine"), true);
+    check("拒答也到了主循环（照发）", got.length, 2);
+    check("但 genuine=false", got[1].genuine, false);
+    // 字段名对不上不会报错，只会**静默失效** —— 所以名字本身也要钉住
+    check("字段名就叫 genuine", Object.keys(got[1]).includes("genuine"), true);
   }
 
-  console.log(`\npassed ${pass}, failed ${fail}`);
+  console.log(`\n通过 ${pass}，失败 ${fail}`);
   fs.rmSync(root, { recursive: true, force: true });
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.error(e); process.exit(1); });

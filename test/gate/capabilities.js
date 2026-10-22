@@ -59,7 +59,7 @@ const tg = new TelegramPlugin({ sender: mk("telegram"), transcribe: async () => 
 const wx = new WeChatPlugin({ sender: mk("wechat") });
 const sg = new SignalPlugin({ sender: mk("signal"), caps });
 
-const inGate = new InboundGate({ store, cold, identities: { "signal:+111": "owner", "telegram:10001": "owner", "wechat:wxid_owner": "owner" } });
+const inGate = new InboundGate({ store, cold, identities: { "signal:+111": "alice", "telegram:1000000001": "alice", "wechat:Alice-wx": "alice" } });
 const outGate = new OutboundGate({ store, cold, caps,
   plugins: new Map([["telegram", tg], ["wechat", wx], ["signal", sg]]) });
 
@@ -93,10 +93,12 @@ function check(name, got, want) {
   check("插件拿到了生成好的资产", sent[sent.length - 1].asset.kind, "voice");
 
   console.log("\n[4] 不支持的渠道：预检拦住，而且一分钱不花 (7.1)");
-  // An intent the platform can't deliver must be rejected before any expensive generation.
-  // Example: message reactions, which WeChat doesn't support.
+  // ⚠️ 2026-09-18 换了例子：这里原来拿「微信发语音」当"平台不支持"的样板，
+  //    但那天微信**能发语音了**（虚拟麦克风让它自己录）。立意没变 ——
+  //    **平台给不了的意图，要在花钱之前就拦住**，只是改用微信真给不了的那个：
+  //    消息表情回应（微信压根没有这个功能）。
   const wxEv = inGate.accept(wx.toDelivery({ local_id: 1, local_type: 1, create_time: 1789600000,
-    sender: "wxid_owner", raw: Buffer.from("在吗", "utf8") }));
+    sender: "Alice-wx", raw: Buffer.from("在吗", "utf8") }));
   const before = ttsCalls;
   const sentBefore = sent.length;
   const r2 = await outGate.deliver({ turnId: "v2", intent: "react", text: "❤️",
@@ -106,7 +108,7 @@ function check(name, got, want) {
   check("没白调公共能力（没花钱）", ttsCalls - before, 0);
   check("没有偷偷改投别的渠道", sent.length - sentBefore, 0);
 
-  // WeChat can send voice; pin it so it isn't reverted to unsupported
+  // 微信现在**能**发语音了，这条顺手钉住，免得哪天又被改回 unsupported
   check("微信 send_voice 已经是 supported", wx.capabilities.send_voice, "supported");
 
   console.log("\n[5] 缺公共能力时说清缺哪一份，不降级成发文字");

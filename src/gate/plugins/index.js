@@ -1,36 +1,49 @@
 "use strict";
 
 /**
- * Plugin loader: adding a channel ("leg") never requires touching the core.
+ * 插头加载器（2026-09-18）—— **加一条腿不用拆桥**
  *
- * Each plugin module describes itself: its name, the config keys it needs,
- * and how to construct it. The core only scans this directory.
+ * Alice：「加 qq 为什么要改核心代码」。原来每加一条腿，`src/host/main.js` 要动四处：
+ * `new` 一个、读它那几个配置、传进 buildGate、挂上主循环。那就是拆主板焊插孔。
+ *
+ * 现在插头自带三样：**叫什么、要哪些配置、怎么造出来**，核心只管扫目录。
+ * 加 QQ = 写一个 `qq.js`、把它要的配置填上，`main.js` 一个字不动。
+ *
+ * ## 一个插头长什么样
  *
  * ```js
  * // src/gate/plugins/qq.js
- * class QQPlugin { … }                       // receive/send details live here only
+ * class QQPlugin { … }                       // 怎么收、怎么发，只有它自己知道
  * module.exports = { QQPlugin };
  * module.exports.leg = {
- *   name: "qq",                              // channel name, one per channel
- *   slot: "qq",                              // buildGate slot (defaults to name)
- *   configKeys: [["GATE_QQ_TOKEN", "QQ bot token"]],   // reported by name when missing
- *   poll: { idleMs: 2000 },                  // omit for long-polling legs
+ *   name: "qq",                              // 渠道名。**一个渠道一个名字**
+ *   slot: "qq",                              // 装进 buildGate 的哪一格（默认同 name）
+ *   configKeys: [["GATE_QQ_TOKEN", "QQ 机器人的 token"]],   // 缺了要当场说清楚
+ *   poll: { idleMs: 2000 },                  // 这条腿怎么捞：不给就按长轮询走
  *   make({ env, log }) { return new QQPlugin({ token: env.GATE_QQ_TOKEN, log }); },
  * };
  * ```
  *
- * Enable/disable rule (no allow-list):
- *   plugin file present AND all its configKeys set  ->  attached automatically
+ * ## 插上 / 取下（Alice 2026-09-18：「不用了就取下来 用就插上」）
  *
- * To disable: delete the file, clear its config, or set `GATE_LEG_<NAME>=off`.
- * The core never knows plugin-specific variable names; missing keys are
- * reported explicitly instead of guessed.
+ * **没有名单，没有开关清单。** 判据只有一条：
+ *
+ *   目录里有这个插头 **且** 它要的配置填齐了 → 自动接上
+ *
+ * - 想接 QQ：放一个 `qq.js`，把它要的几个配置填上 —— 完事
+ * - 不想要了：删掉文件，或者把配置清掉，或者写 `GATE_LEG_QQ=off`
+ *
+ * 配置填齐**本身就是**那个明确的决定（token 不会自己长出来），所以不需要再来
+ * 一份名单说"我要接哪几条" —— 那是同一件事写两遍，还会漏。
+ *
+ * 另一条规矩：**要哪些配置由插头自己说**，核心不认识那些变量名
+ * （铁律 1：不许猜，缺了当场点名）。
  */
 
 const fs = require("fs");
 const path = require("path");
 
-/** Scan the directory and collect every module exporting `leg`. A broken one never blocks the rest. */
+/** 扫目录，把每个带 `leg` 的插头收进来。坏的不拖垮其余。 */
 function discoverLegs({ dir = __dirname, log = () => {} } = {}) {
   const byName = new Map();
   const errors = [];
@@ -55,7 +68,7 @@ function discoverLegs({ dir = __dirname, log = () => {} } = {}) {
       continue;
     }
     const leg = mod && mod.leg;
-    if (!leg) continue;                       // modules without `leg` are helpers, not plugins
+    if (!leg) continue;                       // 没自我介绍的当它不是插头（比如共用的解码模块）
 
     const why = validateLeg(leg);
     if (why) {
@@ -82,11 +95,11 @@ function validateLeg(leg) {
 }
 
 /**
- * Build every leg that is present and fully configured.
+ * 把「目录里有 + 配置齐了」的腿都装出来。
  *
  * @returns {{legs: object[], idle: object[], errors: object[]}}
- *   legs  = [{ name, slot, plugin, poll }]   attached
- *   idle  = [{ name, lacks }]                 present but not attached (missing config / disabled / failed to build)
+ *   legs  = [{ name, slot, plugin, poll }]   真接上的
+ *   idle  = [{ name, lacks }]                 在目录里、但没插上（缺配置 / 被关掉 / 造不出来）
  */
 function loadLegs({ env = process.env, log = () => {}, dir = __dirname } = {}) {
   const { byName, errors } = discoverLegs({ dir, log });
@@ -94,7 +107,7 @@ function loadLegs({ env = process.env, log = () => {}, dir = __dirname } = {}) {
   const idle = [];
 
   for (const [name, leg] of byName) {
-    // explicit off switch, without deleting the file
+    // 显式取下：不删文件也能关掉
     const off = String(env["GATE_LEG_" + name.toUpperCase().replace(/-/g, "_")] || "")
       .trim().toLowerCase();
     if (off === "off" || off === "0" || off === "false") {
@@ -104,7 +117,7 @@ function loadLegs({ env = process.env, log = () => {}, dir = __dirname } = {}) {
 
     const lacks = (leg.configKeys || []).filter(([k]) => !String(env[k] || "").trim());
     if (lacks.length) {
-      // nothing set = leg not wanted, skip quietly; partially set = probably a mistake, warn
+      // 一个都没填 = 根本没打算接这条腿，安静跳过；填了一半 = 多半是忘了，要吵
       const filled = (leg.configKeys || []).length - lacks.length;
       idle.push({ name, lacks, why: filled ? "配置只填了一半" : "没配置" });
       if (filled) log("[插头] " + name + " 配置只填了一半，缺：" + lacks.map(([k]) => k).join(" "));

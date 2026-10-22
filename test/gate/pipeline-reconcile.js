@@ -1,8 +1,9 @@
 "use strict";
 /**
- * Wiring check: does the pipeline really reconcile unacknowledged turns using the outbox
- * ledger as evidence? Runs a real pipeline, outbound gate and ledger with a fake box,
- * simulating a bridge restart in the middle of a turn.
+ * 接线验证（2026-09-18 Keeper）：pipeline 真的把「出站账本当证据」这条自动核对接上了没有。
+ *
+ * 单测钩子绿不代表生产传了参数 —— 这个文件跑的是真 pipeline、真出闸、真账本，
+ * 只有盒子是假的。模拟的就是那件真事：桥在一轮跑到一半时被重启。
  */
 const fs = require("fs");
 const os = require("os");
@@ -24,14 +25,14 @@ const check = (n, got, want) => {
 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-pipe-rec-"));
-const OWNER_ID = "10001";
+const HER = "1000000001";
 const dir = path.join(root, "gate");
 const turnsFile = path.join(dir, "turns.json");
 
 const tgMsg = (id, text) => ({
   message_id: id, text,
-  chat: { id: Number(OWNER_ID), type: "private" },
-  from: { id: Number(OWNER_ID) },
+  chat: { id: Number(HER), type: "private" },
+  from: { id: Number(HER) },
   date: Math.floor(Date.now() / 1000),
 });
 
@@ -44,10 +45,10 @@ function build(answer) {
     call: async () => [],
   });
   const plugins = new Map([["telegram", plugin]]);
-  const inbound = new InboundGate({ store, cold, identities: { ["telegram:" + OWNER_ID]: "owner" } });
+  const inbound = new InboundGate({ store, cold, identities: { ["telegram:" + HER]: "alice" } });
   const outbound = new OutboundGate({ store, cold, plugins });
   const pipe = makePipeline({ plugins, inbound, outbound, box: makeFakeBox({ answer }),
-    router: makeRouter({ preferred: { platform: "telegram", chat_id: OWNER_ID } }), log: () => {} });
+    router: makeRouter({ preferred: { platform: "telegram", chat_id: HER } }), log: () => {} });
   return { pipe, sent, outbound };
 }
 
@@ -83,7 +84,7 @@ const turns = () => JSON.parse(fs.readFileSync(turnsFile, "utf8"));
     check("来源标成 auto", row.reconciledBy, "auto");
     check("证据里点名了 operationId", /operationId=/.test(row.evidence || ""), true);
 
-    // after reconciliation, new messages must be delivered again (a stuck unknown would make this 0)
+    // 关键：认掉之后，新来的话要能正常投出去（unknown 卡着时这里会是 0）
     await pipe.ingest({ channel: "telegram", raw: tgMsg(2, "醒了没") });
     check("重启后照常收发", sent.map((s) => s.text), ["第二句"]);
   }

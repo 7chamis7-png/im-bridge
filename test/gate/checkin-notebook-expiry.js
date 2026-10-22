@@ -1,26 +1,24 @@
 "use strict";
-// Expired-notebook line in the check-in header: expiredNotebookLine() + optional
-// listExpired() on the notebook module. Uses a stub module in a temp dir.
+// 笔记本到期提醒接进 check-in HEADER（2026-09-22 晚）。跟 heart-checkin-notebook.js
+// 用同一个「读标题」的思路，但这里测的是新加的 expiredNotebookLine() / listExpired()
+// 那条链——指向这次任务实际改过的 nova-notebook 副本（生产的 /root/nova-notebook
+// 还没升级到有 listExpired，那边的旧测试用 try/catch 兜底验证了「没有这个函数也不炸」，
+// 这份测的是「有这个函数之后，到期提醒真的接得上」）。
 const assert = require("assert");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { expiredNotebookLine, makeCheckinBeat } = require("../../src/heart/beats/checkin");
 
+const NOTEBOOK_MODULE = "/root/.cache/phase2/nova-notebook/store";
+const nb = require(NOTEBOOK_MODULE);
+
 const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "checkin-expiry-"));
 
-// Stub store: entries {title, expires:"YYYY-MM-DD"}; listExpired returns past-due ones.
-const storeModule = path.join(tmp, "stub-store.js");
-fs.writeFileSync(storeModule, `
-const fs = require("fs");
-const read = (file) => { try { return JSON.parse(fs.readFileSync(file, "utf8")); } catch { return []; } };
-exports.list = ({ file }) => read(file);
-exports.listExpired = ({ file }) => {
-  const today = new Date().toISOString().slice(0, 10);
-  return read(file).filter((e) => e.expires && e.expires < today);
-};
-`);
-const future = new Date(Date.now() + 3 * 86400000).toISOString().slice(0, 10);
+function bjDatePlus(n) {
+  const d = new Date(Date.now() + 8 * 3600e3 + n * 86400000);
+  return d.toISOString().slice(0, 10);
+}
 
 let pass = 0, fail = 0;
 const check = (n, ok, extra = "") => {
@@ -28,58 +26,71 @@ const check = (n, ok, extra = "") => {
   ok ? pass++ : fail++;
 };
 
-console.log("[1] nothing expired → empty string");
+console.log("[1] expiredNotebookLine：没有到期条目 → 空字符串");
 {
   const nbFile = path.join(tmp, "none-expired.json");
-  fs.writeFileSync(nbFile, JSON.stringify([{ title: "not yet", expires: future }]));
-  const line = expiredNotebookLine({ moduleId: storeModule, file: nbFile });
-  check("empty", line === "", line);
+  nb.open({ title: "还没到期", board: "now", expires: bjDatePlus(3), file: nbFile });
+  const line = expiredNotebookLine({ moduleId: NOTEBOOK_MODULE, file: nbFile });
+  check("空字符串", line === "", line);
 }
 
-console.log("[2] expired items → one line, at most 4 titles");
+console.log("[2] expiredNotebookLine：有到期条目 → 拼出「你有N条到期了」这一行，最多列 4 个标题");
 {
   const nbFile = path.join(tmp, "expired.json");
-  fs.writeFileSync(nbFile, JSON.stringify(Array.from({ length: 5 }, (_, i) => ({ title: "item" + i, expires: "2020-01-01" }))));
-  const line = expiredNotebookLine({ moduleId: storeModule, file: nbFile });
-  check("count prefix", line.startsWith("5 notebook item(s) expired: "), line);
-  check("question suffix", line.endsWith("— extend or close?"), line);
-  const titleCount = (line.match(/“item\d”/g) || []).length;
-  check("at most 4 titles", titleCount === 4, String(titleCount));
+  const ids = [];
+  for (let i = 0; i < 5; i += 1) {
+    ids.push(nb.open({ title: "到期条" + i, board: "now", expires: bjDatePlus(1), file: nbFile }).id);
+  }
+  // 直接改底层文件，把这 5 条的 expires 都拨到过去（模拟真的到期了）
+  const raw = JSON.parse(fs.readFileSync(nbFile, "utf8"));
+  for (const it of raw.entries) it.expires = "2020-01-01";
+  fs.writeFileSync(nbFile, JSON.stringify(raw));
+
+  const line = expiredNotebookLine({ moduleId: NOTEBOOK_MODULE, file: nbFile });
+  check("带「你有5条到期了」", line.startsWith("你有5条到期了："), line);
+  check("带「延期还是去掉」的问法", line.endsWith("延期还是去掉？"), line);
+  const titleCount = (line.match(/「到期条\d」/g) || []).length;
+  check("最多列 4 个标题（哪怕 5 条到期）", titleCount, 4);
 }
 
-console.log("[3] missing module / no listExpired → empty, no throw");
+console.log("[3] 模块装不上 / 没有 listExpired → 不炸，返回空字符串（旧版 store 的兜底）");
 {
-  const l1 = expiredNotebookLine({ moduleId: "/nonexistent/store", file: "x" });
-  check("missing module", l1 === "", l1);
-  const fake = path.join(tmp, "fake-store.js");
-  fs.writeFileSync(fake, "module.exports = { list: () => [] };\n");
-  const l2 = expiredNotebookLine({ moduleId: fake, file: "x" });
-  check("no listExpired", l2 === "", l2);
-  const l3 = expiredNotebookLine({ moduleId: "", file: "x" });
-  check("not configured", l3 === "", l3);
+  const l1 = expiredNotebookLine({ moduleId: "/nonexistent/store", file: "无所谓" });
+  check("不存在的模块", l1 === "", l1);
+  // 造一个没有 listExpired 的假 store，模拟「生产还没升级」那种情况
+  const fakeStoreFile = path.join(tmp, "fake-store.js");
+  fs.writeFileSync(fakeStoreFile, "module.exports = { list: () => [] };\n");
+  const l2 = expiredNotebookLine({ moduleId: fakeStoreFile, file: "无所谓" });
+  check("模块没有 listExpired 函数", l2 === "", l2);
 }
 
 async function main() {
-  console.log("[4] wired through makeCheckinBeat: the line appears in the header");
-  {
-    const nbFile = path.join(tmp, "beat.json");
-    fs.writeFileSync(nbFile, JSON.stringify([{ title: "overdue", expires: "2020-01-01" }]));
-    const dir = fs.mkdtempSync(path.join(tmp, "producers-"));
-    const beat = makeCheckinBeat({
-      dir, configFile: path.join(tmp, "nope-cfg.json"), textsFile: path.join(tmp, "nope-texts.md"),
-      coldFile: path.join(tmp, "nope-cold.jsonl"), notebookModule: storeModule, notebookFile: nbFile,
-      clock: { nextDelayMs: () => 0, isDue: () => true, fired() {}, peek: () => ({}) },
-    });
-    assert.strictEqual(beat.name, "check-in");
-    await beat.tick();
-    const f = fs.readdirSync(dir)[0];
-    const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
-    check("line present", text.includes("1 notebook item(s) expired: “overdue”"), text);
-    check("line is in the header (before the body)", text.indexOf("notebook item(s) expired") < text.indexOf("\n\n"), text);
-  }
+console.log("[4] makeCheckinBeat 接上之后，tick() 的正文里真的带出这一行（跟「悬着的」那半平级）");
+{
+  const nbFile = path.join(tmp, "beat.json");
+  nb.open({ title: "早就该处理", board: "now", expires: bjDatePlus(1), file: nbFile });
+  const raw = JSON.parse(fs.readFileSync(nbFile, "utf8"));
+  raw.entries[0].expires = "2020-01-01";
+  fs.writeFileSync(nbFile, JSON.stringify(raw));
 
-  console.log(`\npass ${pass} / fail ${fail}`);
-  process.exit(fail ? 1 : 0);
+  const dir = fs.mkdtempSync(path.join(tmp, "producers-"));
+  const beat = makeCheckinBeat({
+    dir, configFile: path.join(tmp, "nope-cfg.json"), textsFile: path.join(tmp, "nope-texts.md"),
+    coldFile: path.join(tmp, "nope-cold.jsonl"), notebookModule: NOTEBOOK_MODULE, notebookFile: nbFile,
+    desireUrl: "http://127.0.0.1:1",
+    // 2026-09-22 起 check-in 改成空闲触发：这里验的是正文内容，塞个「立刻到点」的闹钟
+    clock: { nextDelayMs: () => 0, isDue: () => true, fired() {}, peek: () => ({}) },
+  });
+  assert.strictEqual(beat.name, "check-in");
+  await beat.tick();
+  const f = fs.readdirSync(dir)[0];
+  const text = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")).text;
+  check("正文里带出到期提醒那一行", text.includes("你有1条到期了：「早就该处理」"), text);
+  check("到期提醒接在「你的驱力」那行附近（HEADER 里，不是正文里）", text.indexOf("你有1条到期了") < text.indexOf("\n\n"), text);
+}
+
+console.log(`\n通过 ${pass} / 失败 ${fail}`);
+process.exit(fail ? 1 : 0);
 }
 
 main().catch((e) => { console.error(e); process.exit(1); });

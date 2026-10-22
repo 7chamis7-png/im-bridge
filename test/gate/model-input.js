@@ -68,7 +68,7 @@ check("undecoded placeholder", normalizeModelInput(env({
 check("no_content placeholder", normalizeModelInput(env({
   text: "should not reach model", media: [{ kind: "voice", text: "secret" }],
 }, { verdict: "no_content" })), {
-  text: "[空事件：既无正文也无媒体，多半是上游取值出错。不要当成 owner 说了什么，更不要猜 owner 想说什么。账本 trace-model-input]",
+  text: "[空事件：既无正文也无媒体，多半是上游取值出错。不要当成她说了什么，更不要猜她想说什么。账本 trace-model-input]",
   attachments: [],
 });
 

@@ -5,55 +5,57 @@ const path = require("path");
 const { normalizeModelInput } = require("./model-input");
 
 /**
- * Group gate — one set of group-chat rules shared by every leg.
+ * 群闸（2026-09-18）—— 群聊那一套规则，一份，四条腿都有
  *
- * Groups are not a separate plugin: group and private chats share the same connection,
- * token and update cursor (e.g. Telegram `getUpdates` is exclusive), so two plugins would
- * steal each other's messages.
+ * Alice问「群聊是不是也算一个插头」。一半对：群确实是独立的一件东西，但**不能是插头**——
+ * 群和私聊共用同一条连接、同一个 token、同一个 `getUpdates` 游标，而 getUpdates 是
+ * 独占的（offset 一推另一个就拿不到），两个插头会互相抢消息。
  *
- * Split per SPEC: decisions live in the shared layer (here), actions in the plugin.
- *   · the plugin extracts facts from raw platform records: sender, is-bot, mentions the agent,
- *     replies to the agent
- *   · this module decides: is the group allowed, should this message wake the agent, buffer
- *     the rest, and hand the whole batch over on wake-up
+ * 所以按 SPEC 那条分界线切：**决定在共用层（这里），动作在插头**。
+ *   · 插头负责从平台原始记录里读出事实：谁说的、是不是 bot、有没有 @ 他、回的是不是他
+ *   · 这里负责决定：这个群准不准进、这条要不要叫醒他、没叫醒的攒着、叫醒时给几条
  *
- * Living in the shared layer means Telegram / WeChat / QQ groups all use the same code. A new
- * platform only has to provide `chatType` / `senderId` / `senderName` / `addressing`.
+ * 放共用层还有一条更硬的理由：**微信群、QQ 群、TG 群用的是同一套**。群逻辑长在
+ * TG 插头里，微信群一来就得再抄一遍 —— 那正是 `recordCold` 三处各抄一份、
+ * 漏一处就失忆的那个病。新平台接进来只要插头交出四样事实：
+ * `chatType` / `senderId` / `senderName` / `addressing`，这里一行不用改。
  *
- * Rules:
- *   · the group allowlist comes from config only — never learned from chat (a bot added to a
- *     stranger's group must not grant itself access)
- *   · wake levels: always-wake group / owner spoke / agent addressed directly / otherwise buffer
- *   · "addressed directly" = a wake word appears, the bot is @mentioned, or a reply to the bot
- *   · external bots can only wake the agent via always-wake or direct address, and are rate limited
- *   · non-waking messages are not dropped: they are buffered and delivered as one batch on wake-up
+ * 规则跟老桥 `adapters/channel/telegram/group-gate.js` **一模一样**（Alice 9-18：
+ * 「之前好像有自己的设置，一模一样弄上就好了」），逐条对过：
+ *   · 群白名单**只认配置**，不许从聊天里自动学习（Bot 被拉进陌生群不会自行扩权）
+ *   · 叫醒四档：这个群一律叫醒 / 她说话 / 直接点他 / 其余只攒着
+ *   · 「直接点他」= 正文出现叫醒词、或 @他的用户名、或回复他的消息
+ *   · 外部 bot 另算：只有「一律叫醒」或「直接点他」才可能醒，还要过冷却和窗口限流
+ *   · 没叫醒的**不是丢掉**，是攒进未读；叫醒那一刻**整批一起给**
  */
 
 /**
- * Wake words: if any of these appears in a group message, the agent wakes up.
- * Configured via GATE_GROUP_WAKE_NAMES (comma-separated), default empty.
+ * 群里出现这些名字就叫醒他。
  *
- * Every added word makes the agent wake more often — consider how busy the group is.
+ * 「Alice」是老桥 2026-08-12 加的：更老的版本靠「她在群里说过话就认领整个群、之后该群
+ * 所有人发言一律放行」来达到同样效果，那套自动学习后来被拆了（防 Bot 被拉进陌生群
+ * 自行扩大授权），副作用是别人喊她名字他不再醒。加关键词比恢复整群放行精准。
+ *
+ * ⚠️ 每加一个词，他在群里醒来的频率就涨一截 —— 加之前先想清楚这个群有多热。
  */
-const WAKE_NAMES = Object.freeze(String(process.env.GATE_GROUP_WAKE_NAMES || "")
-  .split(",").map((s) => s.trim()).filter(Boolean));
+const WAKE_NAMES = Object.freeze(require("../core/names").groupWakeNames());   // 默认 [Nova, Alice]；GATE_GROUP_WAKE_NAMES 可改
 
-/** External bot rate limit: minimum gap between two wakes */
+/** 外部 bot 的限流：两次之间至少隔这么久 */
 const BOT_COOLDOWN_MS = 30_000;
-/** External bot rate-limit window */
+/** 外部 bot 的限流窗口 */
 const BOT_WINDOW_MS = 5 * 60_000;
-/** Max wakes by the same external bot per window */
+/** 一个窗口里最多被同一个外部 bot 叫醒几次 */
 const BOT_MAX_WAKES = 3;
 
 /**
  * @param {object} o
- * @param {string[]} o.allowed        allowed groups, keyed **`channel:groupId`** (e.g. `telegram:-10002`).
- *   From config only, never learned.
- *   The channel prefix is required: raw ids from different platforms can collide, and allowing
- *   a group on platform A must not allow a same-numbered group on platform B.
- * @param {string[]} [o.alwaysWake]   groups where every message wakes the agent (same key format)
- * @param {string[]} [o.wakeNames]    wake words, default WAKE_NAMES
- * @param {number} [o.maxUnread]      max buffered messages per group (drops the oldest)
+ * @param {string[]} o.allowed        准进的群，键是 **`渠道:群id`**（如 `telegram:-1000000004`）。
+ *   **配置给，不许自动学习。**
+ *   ⚠️ 必须带渠道前缀：TG 群是负数、QQ 群是数字、微信群是字符串，裸 id 迟早撞
+ *   —— 撞了就是「放行了 A 平台的群，等于把 B 平台同号的群也放进来」。
+ * @param {string[]} [o.alwaysWake]   这些群里每条都叫醒他（同样带渠道前缀）
+ * @param {string[]} [o.wakeNames]    叫醒词，默认 WAKE_NAMES
+ * @param {number} [o.maxUnread]      一个群最多攒多少条（攒爆了丢最旧的，不是丢最新的）
  * @param {function} [o.now]
  */
 function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
@@ -61,7 +63,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
   const allowSet = new Set(allowed.map(String));
   const wakeSet = new Set(alwaysWake.map(String));
   const persistenceFile = String(stateFile || file || "").trim();
-  /** `channel:groupId` -> { unread: [], botWakeHistory: {}, seenNativeIds: [] } */
+  /** `渠道:群id` -> { unread: [], botWakeHistory: {}, seenNativeIds: [] } */
   const state = new Map();
 
   function cloneMedia(media) {
@@ -137,7 +139,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
 
   loadState();
 
-  /** Group key: channel + group id, unique across platforms. */
+  /** 群的键。**渠道 + 群 id**，跨平台不撞。 */
   const keyOf = (d) => String(d.channel || "") + ":" + String(d.chatId || "");
 
   const groupOf = (key) => {
@@ -148,7 +150,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
     return state.get(k);
   };
 
-  /** External bot rate limit: no wake during cooldown or once the window quota is used */
+  /** 外部 bot 的限流：冷却没过、或窗口内已经叫醒够了，就不再醒 */
   function allowExternalBot(group, senderId) {
     const t = now();
     const key = String(senderId || "");
@@ -164,22 +166,22 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
   return {
     WAKE_NAMES: wakeNames,
 
-    /** Group key `channel:groupId`, exposed so callers can query unread counts. */
+    /** 群的键：`渠道:群id`。对外也暴露，方便调用方查未读。 */
     keyOf,
 
-    /** Is this group allowed? Not configured = not allowed; never learned from chat. */
+    /** 这个群准不准进。**读不到配置一律不准** —— 不许从聊天里自动学习。 */
     isAllowed(d) { return allowSet.has(typeof d === "string" ? d : keyOf(d)); },
 
     /**
-     * What to do with one group message.
+     * 一条群消息该怎么办。
      *
-     * @param {object} d standard delivery plus the plugin's `addressing`:
-     *   { mentionsMe, repliedToMe, senderIsBot } — platform details stay in the plugin
+     * @param {object} d 标准交付，外加插头给的 `addressing`：
+     *   { mentionsMe, repliedToMe, senderIsBot } —— 平台脏活归插头，这里只用结论
      * @param {object} o
-     * @param {string} o.ownerIdentity the owner's identity name (owner messages always wake)
+     * @param {string} o.ownerIdentity 她的身份名（认出来是她 = 一定叫醒）
      * @returns {{allowed:boolean, wake:boolean, reason:string}}
      */
-    decide(d, { identity = "unknown", ownerIdentity = "owner" } = {}) {
+    decide(d, { identity = "unknown", ownerIdentity = "alice" } = {}) {
       const key = keyOf(d);
       if (!this.isAllowed(key)) return { allowed: false, wake: false, reason: "group_not_allowed" };
 
@@ -192,8 +194,8 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
       const direct = Boolean(a.mentionsMe || a.repliedToMe) || named;
 
       if (a.senderIsBot) {
-        // External bots may only wake the agent via always-wake or direct address, and are
-        // rate limited — otherwise two bots can keep waking each other forever.
+        // 外部 bot：只有「这个群一律叫醒」或「直接点他」才谈得上醒，而且还要过限流。
+        // 否则两个 bot 能在群里把对方叫醒、一路刷下去。
         const may = always || direct;
         const wake = may && allowExternalBot(group, d.senderId);
         return { allowed: true, wake, reason: wake ? "external-bot-wake" : "external-bot-background-or-limited" };
@@ -208,11 +210,12 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
     },
 
     /**
-     * Buffer a non-waking message (not dropped): on wake-up the agent sees what happened.
+     * 没叫醒的攒着。**不是丢掉** —— 叫醒那一刻他要看见这中间发生了什么。
      *
-     * `isOwner` must be derived from the real platform id (caller passes the resolveIdentity
-     * result), never from the nickname — anyone can rename themselves. Nicknames are display
-     * only, and brackets are stripped so a nickname can't forge a marker like "[owner]".
+     * ⚠️ `isOwner` 必须由**真实平台 id** 算出来（调用方拿 resolveIdentity 的结果传进来），
+     * 绝不能看昵称：群里任何人都能把昵称改成「Alice」。老桥那头是 `from_is_alice`，
+     * 同一个道理。昵称只配用来显示，而且显示前要把方括号剥掉 —— 不然
+     * 一个叫「[她本人] 张三」的昵称就能把标记伪造出来。
      */
     buffer(d, { speaker = "", isOwner = false } = {}) {
       const group = groupOf(keyOf(d));
@@ -231,7 +234,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
       if (duplicateKey) group.seenNativeIds.push(duplicateKey);
       group.unread.push({
         at: d.receivedAt || new Date(now()).toISOString(),
-        // default to the plugin-provided nickname rather than a numeric id
+        // 默认就用插头给的昵称 —— 调用方忘了传不该退化成一串数字 id
         speaker: String(speaker || d.senderName || d.senderId || "").replace(/[[\]]/g, ""),
         isOwner: Boolean(isOwner),
         // Store the model-readable rendering, while media remains separately
@@ -241,7 +244,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
         nativeId,
         bufferId: String(group.nextBufferId++),
       });
-      // on overflow drop the oldest: the most recent context matters most on wake-up
+      // 攒爆了丢最旧的：他醒来最该看见的是刚刚发生的，不是半天前的
       while (group.unread.length > maxUnread) group.unread.shift();
       saveState();
       return group.unread.length;
@@ -282,7 +285,7 @@ function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
       return removed;
     },
 
-    /** Take the whole buffered batch on wake-up (clears it, never delivered twice). Arg: delivery or group key. */
+    /** 叫醒那一刻把攒的整批取走（取完就清空，不会投两遍）。参数是交付或群键。 */
     takeUnread(d) {
       const group = groupOf(typeof d === "string" ? d : keyOf(d));
       const out = group.unread.map(cloneItem);

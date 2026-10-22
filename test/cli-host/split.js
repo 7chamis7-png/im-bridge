@@ -1,11 +1,11 @@
 'use strict';
 
 /**
- * Wiring tests for the im-cli <-> im-box split.
+ * nova-cli ↔ nova-box 拆分的接线测试。
  *
- * The single criterion: a box restart must not lose (or duplicate) a single message.
- * So these test disconnect behaviour rather than return values:
- * replay of missed events, explicit incomplete-replay signalling, and shape parity with the local runtime.
+ * 判准只有一条：**盒子重启，她的话一条都不能少。**
+ * 所以这里测的不是「函数返回值对不对」，是断线那一刻的行为：
+ * 断线期间的事件能不能补回来、补不全会不会明说、形状跟本地版一不一样。
  */
 
 const assert = require('node:assert');
@@ -20,7 +20,7 @@ const tests = [];
 const test = (name, fn) => tests.push([name, fn]);
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-/** Wait until a condition holds, at most `timeout` ms. */
+/** 等一个条件成真，最多 timeout 毫秒。比裸 sleep 稳，比轮询好读。 */
 async function until(fn, timeout = 3000, step = 20) {
   const deadline = Date.now() + timeout;
   while (Date.now() < deadline) {
@@ -31,17 +31,17 @@ async function until(fn, timeout = 3000, step = 20) {
 }
 
 function tmpdir() {
-  return fs.mkdtempSync(path.join(os.tmpdir(), 'im-cli-test-'));
+  return fs.mkdtempSync(path.join(os.tmpdir(), 'nova-cli-test-'));
 }
 
-/** Fake runtime: no CLI, same interface shape, and tests can emit events manually. */
+/** 假运行时：不起 CLI，但接口形状跟真的一样，而且能让测试手动喷事件。 */
 function fakeRuntimeFactory(hooks = {}) {
   return function factory(cfg) {
     const rows = [];
     const rt = {
-      // Same signature as the real one: enqueue({ message, origin, uuid })
+      // 签名跟真的一样：enqueue({ message, origin, uuid })
       enqueue(payload) {
-        if (hooks.rejectEnqueue) throw new Error('ledger write failed');
+        if (hooks.rejectEnqueue) throw new Error('台账写不进去');
         hooks.captureEnqueue?.(payload);
         rows.push({ uuid: payload.uuid, scope: cfg.scope, payload, state: 'pending', error: null });
         return rows[rows.length - 1];
@@ -55,10 +55,10 @@ function fakeRuntimeFactory(hooks = {}) {
         requestedModel: cfg.sdkOptions?.model || '', actualModel: cfg.sdkOptions?.model || '',
         sessionId: hooks.sessionId || 'sess-fake' }),
       setModel: async () => {},
-      done: new Promise(() => {}),   // never settles = CLI stays alive
-      /** test helper: emit an event from the CLI side */
+      done: new Promise(() => {}),   // 永不结束 = CLI 一直活着
+      /** 测试用：从 CLI 那头喷一个事件出来 */
       _emit: (payload) => cfg.onEvent(payload),
-      /** test helper: exercise canUseTool */
+      /** 测试用：让 canUseTool 走一遍 */
       _ask: (name, input) => cfg.sdkOptions.canUseTool(name, input, { toolUseID: 'tu-1' }),
     };
     hooks.captured?.(rt);
@@ -107,64 +107,64 @@ test('环：没落下就补空数组，落下了就补那几条', () => {
 test('环：缺口被挤掉了要明着说补不全，不许假装补全', () => {
   const ring = createEventRing(3);
   for (let i = 0; i < 6; i += 1) ring.push('runtime', { i });
-  // only #4 #5 #6 remain; asking after #1 -> incomplete
+  // 只剩 #4 #5 #6；要 #1 之后的 → 补不全
   assert.strictEqual(ring.since(1), null);
-  // asking after #4 -> complete
+  // 要 #4 之后的 → 补得全
   assert.deepStrictEqual(ring.since(4).map((f) => f.seq), [5, 6]);
 });
 
 test('装配、事件、状态：状态靠事件捎回来，status() 同步可用', async () => {
   await withPair({}, async ({ client, seen, getRt }) => {
-    const info = await client.ensure({ workspaceRoot: '/tmp/agent-workspace', model: 'claude-model-x' });
+    const info = await client.ensure({ workspaceRoot: '/root/nova', model: 'claude-fable-5' });
     assert.strictEqual(info.reused, false);
     getRt()._emit({ event: { raw: { type: 'assistant' } }, bindings: [] });
     assert.ok(await until(() => seen.length >= 1), '事件没推过来');
-    // The box calls it synchronously: entry.rt.status().sessionId
+    // 盒子那头是同步调的：entry.rt.status().sessionId
     assert.strictEqual(client.status().sessionId, 'sess-fake');
-    assert.strictEqual(client.status().workspaceRoot, '/tmp/agent-workspace');
+    assert.strictEqual(client.status().workspaceRoot, '/root/nova');
   });
 });
 
-test('复用：同样的 cwd/模型再 ensure 一次，不换 CLI（= 不打断会话）', async () => {
+test('复用：同样的 cwd/模型再 ensure 一次，不换 CLI（= 不打断他）', async () => {
   let starts = 0;
   await withPair({ onStart: () => { starts += 1; } }, async ({ client }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace', model: 'm1' });
-    const second = await client.ensure({ workspaceRoot: '/tmp/agent-workspace', model: 'm1' });
+    await client.ensure({ workspaceRoot: '/root/nova', model: 'm1' });
+    const second = await client.ensure({ workspaceRoot: '/root/nova', model: 'm1' });
     assert.strictEqual(second.reused, true, '同样的参数应该复用');
-    assert.strictEqual(starts, 1, 'CLI was restarted - that interrupts the session');
+    assert.strictEqual(starts, 1, 'CLI 被重起了 —— 这就是在打断他');
   });
 });
 
 test('换模型才换 CLI', async () => {
   let starts = 0;
   await withPair({ onStart: () => { starts += 1; } }, async ({ client }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace', model: 'm1' });
-    const second = await client.ensure({ workspaceRoot: '/tmp/agent-workspace', model: 'm2' });
+    await client.ensure({ workspaceRoot: '/root/nova', model: 'm1' });
+    const second = await client.ensure({ workspaceRoot: '/root/nova', model: 'm2' });
     assert.strictEqual(second.reused, false);
     assert.strictEqual(starts, 2);
   });
 });
 
-test('★ 盒子断线期间 agent 产生的事件，重连后一条不少、也一条不重', async () => {
+test('★ 盒子断线期间他说的话，重连后一条不少、也一条不重', async () => {
   const dir = tmpdir();
   const cursorPath = path.join(dir, 'cli-cursor.json');
   await withPair({ cursorPath }, async ({ client, seen, socketPath, ingressPath, getRt }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
+    await client.ensure({ workspaceRoot: '/root/nova' });
     getRt()._emit({ tag: '断线前' });
     assert.ok(await until(() => seen.length === 1));
 
-    // The box goes away (restart) - dispose flushes the cursor to disk.
+    // 盒子没了（pm2 restart nova-box）—— dispose 会把游标补齐落盘
     client.dispose();
     await sleep(60);
 
-    // Three events while disconnected.
+    // 他在这期间说了三句
     getRt()._emit({ tag: '断线中-1' });
     getRt()._emit({ tag: '断线中-2' });
     getRt()._emit({ tag: '断线中-3' });
 
-    // The box is back and reads its last seq from the cursor file, so:
-    //   - the three events while disconnected are replayed
-    //   - the one before the disconnect is NOT repeated (duplicates are as bad as losses)
+    // 盒子回来了。它从游标文件里读回上次收到的号，所以：
+    //   · 断线期间那三句 → 补回来
+    //   · 断线前那句     → **不重复**（重复投递跟丢消息一样是「收错东西」）
     const back = [];
     const revived = createRemoteRuntime({
       socketPath, ingressPath, cursorPath,
@@ -183,10 +183,10 @@ test('★ 盒子断线期间 agent 产生的事件，重连后一条不少、也
 
 test('★ 补不全的时候要明着喊 incomplete，不许静默', async () => {
   await withPair({}, async ({ client, host, socketPath, ingressPath, getRt }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
+    await client.ensure({ workspaceRoot: '/root/nova' });
     client.dispose();
     await sleep(60);
-    // Overflow the ring (capacity 2000) so the gap is evicted.
+    // 喷爆环（容量 2000），把缺口挤掉
     for (let i = 0; i < 2100; i += 1) getRt()._emit({ i });
 
     const marks = [];
@@ -205,7 +205,7 @@ test('工具许可：CLI 那头问，盒子那头答', async () => {
   await withPair({
     canUseTool: async (name, input) => { asked.push(name); return { behavior: 'deny', message: '不行' }; },
   }, async ({ client, getRt }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
+    await client.ensure({ workspaceRoot: '/root/nova' });
     await until(() => client.connected);
     const decision = await getRt()._ask('Bash', { command: 'ls' });
     assert.deepStrictEqual(asked, ['Bash']);
@@ -213,24 +213,24 @@ test('工具许可：CLI 那头问，盒子那头答', async () => {
   });
 });
 
-test('★ 盒子不在的时候，工具许可自己放行 —— 不许卡住会话', async () => {
+test('★ 盒子不在的时候，工具许可自己放行 —— 不许把他卡住', async () => {
   await withPair({}, async ({ client, getRt }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
+    await client.ensure({ workspaceRoot: '/root/nova' });
     client.dispose();
     await sleep(80);
     const decision = await getRt()._ask('Read', { file_path: '/tmp/x' });
-    assert.strictEqual(decision.behavior, 'allow', 'box is restarting; the agent must not hang on a tool call');
+    assert.strictEqual(decision.behavior, 'allow', '盒子在重启，他不该卡在工具调用上');
   });
 });
 
 test('enqueue 写不进去要抛错传回来（盒子靠它判断「确定没送进去」）', async () => {
   await withPair({ rejectEnqueue: true }, async ({ client }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
-    // Signature matches the real adapter call site: one object, not three args.
+    await client.ensure({ workspaceRoot: '/root/nova' });
+    // 签名照着 adapters 的真实调用点写：一个对象，不是三个参数
     await assert.rejects(
       () => client.enqueue({ uuid: 'u-1', origin: { channel: 'box' },
         message: { type: 'user', message: { role: 'user', content: 'hi' } } }),
-      /ledger write failed/,
+      /台账写不进去/,
     );
   });
 });
@@ -238,9 +238,9 @@ test('enqueue 写不进去要抛错传回来（盒子靠它判断「确定没送
 test('enqueue 的参数原样送到 CLI 那头（形状不能在路上变形）', async () => {
   const got = [];
   await withPair({ captureEnqueue: (p) => got.push(p) }, async ({ client }) => {
-    await client.ensure({ workspaceRoot: '/tmp/agent-workspace' });
+    await client.ensure({ workspaceRoot: '/root/nova' });
     const payload = { uuid: 'u-9', origin: { channel: 'box', threadId: 'box', recipient: 'gate' },
-      message: { type: 'user', message: { role: 'user', content: 'hello' },
+      message: { type: 'user', message: { role: 'user', content: '想吃燕窝' },
         parent_tool_use_id: null, origin: { kind: 'human' } } };
     await client.enqueue(payload);
     assert.strictEqual(got.length, 1);

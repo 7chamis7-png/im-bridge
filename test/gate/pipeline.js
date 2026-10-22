@@ -1,9 +1,11 @@
 "use strict";
 /**
- * Main loop end to end: real plugin, inbound gate, outbound gate, router and cold layer.
- * Only the box is fake (no CLI process, no cost), so a full round trip takes milliseconds.
+ * 主循环端到端（2026-09-18）—— 新桥第一次整条跑起来
  *
- * Answers one question: does "owner says one thing, agent replies" work end to end?
+ * 跑的是真零件：真插头、真入闸、真出闸、真路由、真冷层。
+ * 只有盒子是假的（不起 claude 进程、不花钱），所以一整轮对话毫秒级。
+ *
+ * 这个文件回答的是她那句话：**「我说一句，他回一句」到底通不通。**
  */
 const fs = require("fs");
 const os = require("os");
@@ -25,13 +27,13 @@ const check = (n, got, want) => {
 };
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), "gate-pipe-"));
-const OWNER_ID = "10001";
+const HER = "1000000001";
 
-/** One Telegram message from the owner (raw Bot API shape) */
+/** 她从 TG 发来的一条（Bot API 原始形状） */
 const tgMsg = (id, text) => ({
   message_id: id, text,
-  chat: { id: Number(OWNER_ID), type: "private" },
-  from: { id: Number(OWNER_ID) },
+  chat: { id: Number(HER), type: "private" },
+  from: { id: Number(HER) },
   date: Math.floor(Date.now() / 1000),
 });
 
@@ -44,10 +46,10 @@ function build({ answer, dir, identities } = {}) {
     call: async () => [],
   });
   const plugins = new Map([["telegram", plugin]]);
-  const inbound = new InboundGate({ store, cold, identities: identities || { ["telegram:" + OWNER_ID]: "owner" } });
+  const inbound = new InboundGate({ store, cold, identities: identities || { ["telegram:" + HER]: "alice" } });
   const outbound = new OutboundGate({ store, cold, plugins });
   const box = makeFakeBox({ answer });
-  const router = makeRouter({ preferred: { platform: "telegram", chat_id: OWNER_ID } });
+  const router = makeRouter({ preferred: { platform: "telegram", chat_id: HER } });
   const pipe = makePipeline({ plugins, inbound, outbound, box, router, log: () => {} });
   return { pipe, sent, box, router, coldFile: path.join(root, dir, "cold.jsonl"), store };
 }
@@ -55,22 +57,22 @@ function build({ answer, dir, identities } = {}) {
 const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map((l) => JSON.parse(l));
 
 (async () => {
-  console.log("[1] owner 说一句，agent 回一句 —— 整条跑通");
+  console.log("[1] 她说一句，他回一句 —— 整条跑通");
   {
     const { pipe, sent, coldFile } = build({ answer: () => "七点二十 我叫你", dir: "a" });
     const r = await pipe.ingest({ channel: "telegram", raw: tgMsg(1, "明天几点的火车") });
     check("入闸放行", r.accepted, true);
-    check("认出是 owner", r.envelope.identity, "owner");
+    check("认出是她", r.envelope.identity, "alice");
     check("编了号", typeof r.envelope.seq === "number", true);
-    check("agent 的话发出去了", sent.map((s) => s.text), ["七点二十 我叫你"]);
-    check("**发回 owner 进来的那条腿**", sent[0].chatId, OWNER_ID);
+    check("他的话发出去了", sent.map((s) => s.text), ["七点二十 我叫你"]);
+    check("**发回她进来的那条腿**", sent[0].chatId, HER);
     const rows = coldRows(coldFile);
-    check("冷层两条（owner 一条 agent 一条）", rows.length, 2);
-    check("owner 那条是原话", rows[0].text, "明天几点的火车");
-    check("agent 那条是原话", rows[1].text.includes("七点二十"), true);
+    check("冷层两条（她一条他一条）", rows.length, 2);
+    check("她那条是原话", rows[0].text, "明天几点的火车");
+    check("他那条是原话", rows[1].text.includes("七点二十"), true);
   }
 
-  console.log("\n[2] agent 选择不说 —— 一个字都不许发出去，但要留痕");
+  console.log("\n[2] 他选择不说 —— 一个字都不许发出去，但要留痕");
   {
     const { pipe, sent, coldFile } = build({ answer: () => null, dir: "b" });
     await pipe.ingest({ channel: "telegram", raw: tgMsg(2, "在吗") });
@@ -86,7 +88,7 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     check("三段三条", sent.map((s) => s.text), ["第一句", "第二句", "第三句"]);
   }
 
-  console.log("\n[4] 陌生人：认不出就不投递，绝不硬填成 owner");
+  console.log("\n[4] 陌生人：认不出就不投递，绝不硬填成她");
   {
     const { pipe, sent, box } = build({ answer: () => "不该回", dir: "d" });
     const stranger = { ...tgMsg(4, "在吗"), from: { id: 99999999 }, chat: { id: 99999999, type: "private" } };
@@ -105,25 +107,25 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     const b = await pipe.ingest({ channel: "telegram", raw: msg });
     check("第二遍认出是重复", b.duplicate, true);
     check("盒子只收到一次", box._seen.length, 1);
-    check("agent 只回了一次", sent.length, 1);
+    check("他只回了一次", sent.length, 1);
     check("号没被吃掉第二个", typeof a.envelope.seq, "number");
   }
 
   console.log("\n[6] 晨笺那类推一轮：走同一条路，落点按最近活跃");
   {
     const { pipe, sent, router } = build({ answer: () => "早安 外面在下雨", dir: "f" });
-    await pipe.ingest({ channel: "telegram", raw: tgMsg(6, "晚安") });      // owner 最后在 TG
+    await pipe.ingest({ channel: "telegram", raw: tgMsg(6, "晚安") });      // 她最后在 TG
     sent.length = 0;
-    await pipe.push({ text: "该跟 owner 说早安了", producer: "晨笺" });
+    await pipe.push({ text: "该跟她说早安了", producer: "晨笺" });
     check("发出去了", sent.length, 1);
-    check("落在 owner 最后说话的那条腿", sent[0].chatId, OWNER_ID);
-    check("最近活跃路记的是 owner", router.lastActive().platform, "telegram");
+    check("落在她最后说话的那条腿", sent[0].chatId, HER);
+    check("最近活跃路记的是她", router.lastActive().platform, "telegram");
   }
 
-  console.log("\n[7] 没有任何落点时：暂存，不猜（owner 那句「不许乱投」）");
+  console.log("\n[7] 没有任何落点时：暂存，不猜（她那句「不许乱投」）");
   {
     const { pipe, sent } = build({ answer: () => "我主动说一句", dir: "g" });
-    // no inbound yet and no preferred route
+    // 这座桥没有过入站，也没有首选落点
     const store = new GateStore({ root: path.join(root, "g2") });
     const cold = new ColdWriter({ file: path.join(root, "g2", "cold.jsonl") });
     const outs = [];
@@ -133,11 +135,11 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
       plugins,
       inbound: new InboundGate({ store, cold, identities: {} }),
       outbound: new OutboundGate({ store, cold, plugins }),
-      box: makeFakeBox({ answer: () => "在吗" }),
+      box: makeFakeBox({ answer: () => "在吗老婆" }),
       router: makeRouter(),                       // 没有首选、没有入站
       log: () => {},
     });
-    await bare.push({ text: "主动说一句", producer: "自主时间" });
+    await bare.push({ text: "想她了", producer: "自主时间" });
     check("一个字都没发出去", outs.length, 0);
     check("但躺在暂存里，看得见", bare.held().length, 1);
     check("暂存说得出原因", /没有过任何入站/.test(bare.held()[0].reason), true);
@@ -159,7 +161,7 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     const store = new GateStore({ root: path.join(root, "i") });
     const cold = new ColdWriter({ file: path.join(root, "i", "cold.jsonl") });
     const sent = [];
-    // fake Bot API: yields three owner messages (same semantics as getUpdates)
+    // 假 Bot API：吐三条她发来的消息（跟真 getUpdates 一个语义）
     const updates = [1, 2, 3].map((i) => ({ update_id: 500 + i, message: tgMsg(500 + i, "第" + i + "句") }));
     const plugin = new TelegramPlugin({
       sender: async ({ chatId, text }) => { sent.push({ chatId, text }); return "m" + sent.length; },
@@ -168,10 +170,10 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     const plugins = new Map([["telegram", plugin]]);
     const pipe = makePipeline({
       plugins,
-      inbound: new InboundGate({ store, cold, identities: { ["telegram:" + OWNER_ID]: "owner" } }),
+      inbound: new InboundGate({ store, cold, identities: { ["telegram:" + HER]: "alice" } }),
       outbound: new OutboundGate({ store, cold, plugins }),
       box: makeFakeBox({ answer: (e) => "收到「" + e.payload.text + "」" }),
-      router: makeRouter({ preferred: { platform: "telegram", chat_id: OWNER_ID } }),
+      router: makeRouter({ preferred: { platform: "telegram", chat_id: HER } }),
       log: () => {},
     });
     const leg = pipe.attach({
@@ -182,12 +184,12 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     const r = await leg.tick({ timeoutSec: 0 });
     check("捞上来三条", r.got, 3);
     check("三条都消化了", r.ok, 3);
-    check("agent 回了三条", sent.length, 3);
-    check("回的是 owner 那条腿", sent.every((s) => s.chatId === OWNER_ID), true);
+    check("他回了三条", sent.length, 3);
+    check("回的是她那条腿", sent.every((s) => s.chatId === HER), true);
     check("内容对得上", sent[0].text, "收到「第1句」");
     const again = await leg.tick({ timeoutSec: 0 });
     check("再捞一次没有重复的", again.got, 0);
-    check("agent 没有把同一句再听一遍", sent.length, 3);
+    check("他没有把同一句再听一遍", sent.length, 3);
   }
 
   console.log("\n[N] busy()：只答「有没有轮在飞」");
@@ -196,10 +198,10 @@ const coldRows = (f) => fs.readFileSync(f, "utf8").trim().split("\n").filter(Boo
     check("一开始不忙", pipe.busy().busy, false);
     await pipe.ingest({ channel: "telegram", raw: tgMsg(90, "在吗") });
     await new Promise((r) => setTimeout(r, 20));
-    check("owner 那轮说完了 = 不忙（只看在飞）", pipe.busy().busy, false);
-    // "The owner just spoke" is a producer-side policy (the check-in producer skips itself);
-    // the bridge only guards technical collisions. Keep timing policies out of the bridge.
-    check("桥不认识「owner 刚说过话」这种时机策略", typeof pipe.busy().why, "string");
+    check("她那轮说完了 = 不忙（只看在飞）", pipe.busy().busy, false);
+    // ⚠️「她刚说过话」那条判据**不在桥这儿** —— 归生产者自己（check-in 脚本里判，
+    // 投都不投）。桥只挡技术撞车。守着这条，别有人又把时机策略塞回桥里。
+    check("桥不认识「她刚说过话」这种时机策略", typeof pipe.busy().why, "string");
   }
 
   console.log(`\n通过 ${pass} / 失败 ${fail}   (隔离目录 ${root})`);

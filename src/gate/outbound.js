@@ -12,32 +12,32 @@ const ARTIFACT_RULES = [
 ];
 
 /**
- * Detecting a hallucinated inbound continuation appended by the model:
+ * 他续写的**假入站**长什么样（2026-09-19 从生产抓的真样本）：
  *
  * ```
- *   ...reply text
+ *   …正文正文正文
  *   user<channel source="wechat" chat_id="…" message_id="…:2594" ts="…">
- *   (text the owner never sent)
+ *   70？我觉得951 你在教我做事？
  *   </channel>
  * ```
  *
- * The model sometimes continues past its own reply and invents the next user message
- * (the referenced message id doesn't exist in the event ledger). Left in the cold layer,
- * such text would later be replayed as if the owner had said it.
+ * 9-18 15:17 那条：编号 2594 **在事件账本里根本不存在**，她没发过。
+ * 而他下一步就照着自己编的那句回了一条语音 —— 这就是 7-25 那批幻觉入站的成因
+ * （他分不清上下文里哪段是自己写的、哪段是她说的，见 CLAUDE.md「她的话只能来自她」）。
  *
- * Only this exact shape is recognized (`user` immediately followed by `<channel`). The narrow
- * rule is intentional: `user:` appears legitimately in technical conversation.
- * The other rules (`ARTIFACT_RULES`) only record a note and never touch the body.
- *
- * The detector lives in src/core/hallucination-cut.js (shared by box and outbound gate) and also
- * recognizes a second shape: a tool call written as plain text (`action\n<invoke name="…">…`).
- * What is sent to the owner is always the original text; only the cold layer stores the cut version.
+ * **只认这一种形状**（`user` 紧跟 `<channel`）——判据窄是故意的：
+ * 他跟她聊技术时正文里出现 `user:` 是常事，宽了就会把正经话拦腰砍断。
+ * 其余几条规则照旧只记一笔（`ARTIFACT_RULES`），不动正文。
  */
+//
+// 2026-09-21 夜：判据搬进 src/core/hallucination-cut.js（盒子 / 出闸 / forge 共用一份），
+// 顺手认第二种形状 —— 把工具调用写成正文（`action\n<invoke name="…">…`）。
+// **发给她的照旧是原文**（下面 #deliver 那段），切过的只进冷层。
 const { cutHallucinatedTail, FORGED_INBOUND_RE } = require("../core/hallucination-cut");
 
 /**
- * Legacy helper recognizing shape 1 (forged inbound) only; new code uses `cutHallucinatedTail`.
- * @returns {{text:string, cut:string}} non-empty cut = matched
+ * 只认形状 1（假入站）的老口子，留着给外面的调用方；新代码用 `cutHallucinatedTail`。
+ * @returns {{text:string, cut:string}} cut 非空 = 命中
  */
 function cutForgedInbound(text) {
   const s = String(text || "");
@@ -73,7 +73,7 @@ function receiptOf(value) {
 }
 
 class OutboundGate {
-  constructor({ store, cold, plugins, undelivered = null, caps = null, sequenceScope = "owner",
+  constructor({ store, cold, plugins, undelivered = null, caps = null, sequenceScope = "alice",
     segmenter = null, sendGapMs = 700, sendGapByChannel = {}, outbox = null }) {
     this.store = store;
     this.cold = cold;
@@ -83,15 +83,16 @@ class OutboundGate {
     this.sequenceScope = sequenceScope;
     this.segmenter = segmenter;
     this.sendGapMs = sendGapMs;
-    // Inter-bubble delay can be overridden per channel: a fixed number or a random range {min,max}
-    // (a fixed short gap looks robotic on some platforms). Defaults are unchanged for other channels.
+    // 段间间隔可以按渠道覆盖，值可以是定值（数字）或随机区间 {min,max}。
+    // 2026-09-20 微信因 Frida 被处罚后，她要微信段间随机 1~3 秒（0.7 秒定值太机器）——
+    // 但别动 Telegram/iMessage，它们没这问题。所以做成每渠道覆盖，默认全不变。
     this.sendGapByChannel = sendGapByChannel || {};
     this.outbox = outbox || new Outbox({ root: store.root, store, undelivered });
     this.outbox.attachUndelivered?.(undelivered);
     this._tail = Promise.resolve();
   }
 
-  /** Delay between two bubbles on this channel: fixed value, or a random pick in [min,max]. */
+  /** 这个渠道两段之间等多久。定值直接返回；随机区间就在 [min,max] 里掷一个。 */
   #gapFor(channel) {
     const g = this.sendGapByChannel[channel];
     const spec = g === undefined ? this.sendGapMs : g;
@@ -150,20 +151,27 @@ class OutboundGate {
   }
 
   /**
-   * Should this message go into the cold layer?
+   * 这一条要不要进冷层。
    *
-   * The cold layer holds real conversation only — what the owner said and what the agent said.
-   * Written by default; skipped only if upstream says so. Two kinds must not go in:
+   * **冷层只装真实对话** —— 她说的话、他说的话。默认写；上游说不写才不写。
    *
-   *   1. The bridge's own receipts (/status /help /model ...): not conversation.
-   *   2. Runtime-generated text (safety refusals, API errors). Cold records may later be
-   *      replayed into a new session as real turns; such text would become a false memory
-   *      of the agent having said "API Error".
+   * 不该进的两类（2026-09-18 Alice：「不是模型真实回复不落冷层」）：
    *
-   * The decision is not made here: recognizing `<synthetic>` is backend-specific knowledge.
-   * Upstream writes its verdict into `turn.cold.write`; the gate executes and records it.
+   *   1. **桥自己的回执**（/status /help /model …）。`pipeline.js` 那行注释
+   *      「命令不进盒子、不进对话冷层 —— 那不是跟他说的话」7 月就写了，
+   *      但实现一直没跟上：命令回执照样走出闸、照样以 `role:"assistant"` 落库。
    *
-   * Skips are always traced: the body goes to the event ledger instead. Silently dropping is worst.
+   *   2. **运行时造的文本**（安全层拒答、API 报错）。9-18 京时 23:18 当场吃过：
+   *      那句「API Error: … safeguards flagged …」以**他的身份**躺进了冷层。
+   *      后果不是多一行脏数据 —— 换舱 / forge 会把冷层原话当**真实轮**塞回他的会话，
+   *      等于给他造一段「我说过 API Error」的假记忆；而换舱本来是安全层黏连的解药
+   *      （见记忆 `project-fable-guard`），药里就掺了病。
+   *
+   * **判断不在这儿做。** 认 `<synthetic>` 是 claude 特有的知识，桥不认识 claude
+   * （铁律 3）—— 上游把结论写进 `turn.cold.write`，闸只负责执行 + 留痕。
+   *
+   * 跳过的**一定要留痕**：正文进事件账本，不进冷层。悄悄丢是最坏的
+   * （跟投递层「不许让他以为发了」同一条规矩）。
    */
   #writeCold(coldId, text, turn = null) {
     const cold = turn && turn.cold;
@@ -177,13 +185,13 @@ class OutboundGate {
       });
       return { written: false, id: coldId, skipped: true };
     }
-    // Hallucinated tails (forged inbound / text tool calls) are kept out of the cold layer:
-    // if replayed into a new session, the model would learn to imitate them. The copy sent to
-    // the owner is untouched; the cold layer stores the cut text, the original stays in the
-    // outbox payload, and the event gets a preview of the tail.
+    // 2026-09-21 夜：他正文尾巴上的续写幻觉（假入站 / 文字工具调用）**不进冷层**。
+    // 那晚这些尾巴进了冷层 → 换舱 forge 把它们当他说过的话塞回新舱 → 新舱照着学，
+    // 每轮都炸「tool call could not be parsed」。发给她的那份不动（照发，只留痕），
+    // 这里只是冷层存切过的；原文在出闸账本（outbox 的 payload）里，事件里再留个尾巴预览。
     const clean = cutHallucinatedTail(text || "");
     if (clean.cut && !clean.text.trim()) {
-      // Entirely hallucinated — not a real reply: same handling as above (skip, but trace).
+      // 整条都是幻觉 —— 那不是他的话，跟上面「不是真实回复」同一个处理：不落冷层，留痕
       this.store.appendEvent({ kind: "cold.skipped", coldId, turnId: (turn && turn.turnId) || "",
         reason: "hallucination_only", hallucination: clean.kind, text: text || "" });
       return { written: false, id: coldId, skipped: true };
@@ -228,21 +236,27 @@ class OutboundGate {
 
   async #deliver(turn) {
     const text = String(turn.text || "").trim();
-    // The outgoing text is never rewritten (policy: keep symptoms visible). The detector is
-    // used only to observe: a note + a log line, while the original is sent as written
-    // (test/gate/e2e.js asserts "the outgoing text is the original").
-    // Second shape (text tool call) is recorded as `outbound.text_tool_call_seen`; the cut
-    // version only goes into the cold layer (see #writeCold).
+    // ⚠️ **正文一个字都不改写**（Alice的方针：不加闸，症状留可见）。
+    // 2026-09-19 我写过一版"砍掉假入站再发"，被 `test/gate/e2e.js` 的
+    // 「外发的是原文，没被改写」当场挡下 —— 那条断言就是这个决定本身。
+    // 判据（`cutForgedInbound`）留着**只用来看见**：下面 notes 里记一笔、日志喊一声，
+    // 但发出去的还是他写的原样。要不要改成截断，是她拍板的事，不是我顺手改的。
+    //
+    // 2026-09-21 夜加：认第二种形状（文字工具调用），另记 `outbound.text_tool_call_seen`。
+    // 发出去的**仍是原文**；切过的那份只进冷层（见 #writeCold）。
     const forged = cutHallucinatedTail(text);
+    // 2026-10-16 keeper：试过把过滤网也接到「发给她」这条路，Alice当场否了——
+    //「不要剪掉 我要看到他的幻觉我才方便判断」。所以发给她的照旧是原文（她的诊断信号），
+    // 过滤网仍只用来清冷层（#writeCold 内部那份）。保留 forged 只为下面记一笔、看得见。
     if (forged.kind === "forged_inbound") {
       this.store.appendEvent({ kind: "outbound.forged_inbound_seen", turnId: turn.turnId || "",
         cut: forged.cut.length, preview: forged.cut.slice(0, 200) });
-      console.log("[出闸] ⚠️ 这一轮正文里带了 agent 自己续写的假入站（照发，只留痕）："
+      console.log("[出闸] ⚠️ 这一轮正文里带了他自己续写的假入站（照发，只留痕）："
         + JSON.stringify(forged.cut.slice(0, 120)));
     } else if (forged.kind === "text_tool_call") {
       this.store.appendEvent({ kind: "outbound.text_tool_call_seen", turnId: turn.turnId || "",
         cut: forged.cut.length, preview: forged.cut.slice(0, 200) });
-      console.log("[出闸] ⚠️ 这一轮正文里带了 agent 写成文字的工具调用（照发，只留痕）："
+      console.log("[出闸] ⚠️ 这一轮正文里带了他写成文字的工具调用（照发，只留痕）："
         + JSON.stringify(forged.cut.slice(0, 120)));
     }
     const intent = turn.intent || "send_text";
@@ -313,9 +327,10 @@ class OutboundGate {
     op = this.outbox.update(op.operationId, { state: "submitted", payload, segments });
 
     let asset = null;
-    // If the caller already supplied a file, don't generate one. `send_image` uses the
-    // `send_generated_image` intent, so an existing local image would otherwise be routed to
-    // the image generator and fail with "a prompt is required".
+    // **他已经给了文件就别再造一个**（2026-09-19，Alice：「把发图片接上」）。
+    // `send_image` 的 intent 是 `send_generated_image`，所以发一张本机已有的图
+    // 原来也会被拖去生图，炸在「generate_image 要有提示词」——
+    // 生产账本里两条 outbound.unknown 就是这么来的。他明明把图递进来了。
     const supplied = hasSuppliedFile(turn);
     const need = supplied ? null : INTENT_NEEDS[intent];
     if (supplied && INTENT_NEEDS[intent]) {

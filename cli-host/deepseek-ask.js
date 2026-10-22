@@ -1,36 +1,26 @@
 'use strict';
 
 /**
- * Send one line to a standalone DeepSeek process and print the reply.
- * Bypasses the box and every channel.
- *
- *   node cli-host/deepseek-ask.js "are you there?"
+ * 给单独那只 DeepSeek 送一句话，把回的字打出来。不经过盒子，不经过微信。
+ *   node cli-host/deepseek-ask.js 在吗
  */
 
-const os = require('node:os');
 const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { createRemoteRuntime } = require('./client');
 
-function envStr(name, fallback = '') {
-  const v = process.env[name];
-  return (typeof v === 'string' && v.trim()) ? v.trim() : fallback;
-}
+const { homePath, gateRoot } = require('../src/core/paths');
 
-const bridgeHome = envStr('IM_BRIDGE_HOME', path.join(os.homedir(), '.im-bridge'));
-const gateRoot = envStr('GATE_ROOT', path.join(bridgeHome, 'gate'));
-const root = envStr('DEEPSEEK_ROOT', path.join(gateRoot, 'deepseek'));
-const socketPath = envStr('DEEPSEEK_SOCKET', path.join(root, 'deepseek.sock'));
+const root = process.env.DEEPSEEK_ROOT || homePath('.nova-deepseek');
+const socketPath = process.env.DEEPSEEK_SOCKET || path.join(root, 'deepseek.sock');
 const text = process.argv.slice(2).join(' ').trim();
 if (!text) {
-  console.error('usage: node cli-host/deepseek-ask.js <message>');
+  console.error('用法: node cli-host/deepseek-ask.js 要说的话');
   process.exit(2);
 }
-// The box is the only client of its CLI socket. Connecting a second client
-// would kick the box off, and the owner's next message would go unanswered.
-const boxSocket = envStr('AGENT_CLI_SOCKET', path.join(gateRoot, 'cli.sock'));
-if (path.resolve(socketPath) === path.resolve(boxSocket) && process.env.DEEPSEEK_ASK_FORCE !== '1') {
-  console.error('This socket is the one the box uses; connecting here would disconnect the box. Set DEEPSEEK_ASK_FORCE=1 to override.');
+// 生产插座上盒子是唯一的连接。再连一次会把盒子踢掉，她的下一条就没人收。
+if (socketPath === path.join(gateRoot(), 'cli.sock') && process.env.DEEPSEEK_ASK_FORCE !== '1') {
+  console.error('这只已经接在盒子上。不要从旁边再连，会把盒子踢掉。');
   process.exit(2);
 }
 
@@ -52,7 +42,7 @@ const client = createRemoteRuntime({
 });
 
 const timer = setTimeout(() => {
-  console.error('Timed out waiting for a result.');
+  console.error('等了太久，没有结果。');
   client.dispose();
   process.exit(1);
 }, Number(process.env.DEEPSEEK_ASK_TIMEOUT_MS || 100000));
@@ -60,7 +50,7 @@ timer.unref?.();
 
 (async () => {
   await client.ensure({
-    workspaceRoot: envStr('DEEPSEEK_CWD', envStr('GATE_WORKSPACE_ROOT', process.cwd())),
+    workspaceRoot: process.env.DEEPSEEK_CWD || process.env.GATE_WORKSPACE_ROOT || homePath('nova'),
     model: 'deepseek',
     ingressPath: path.join(root, 'state', 'ingress.json'),
   });

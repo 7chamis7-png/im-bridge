@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 'use strict';
-// MCP entry point for the Telegram-only tool package. Delivery always goes through the bridge
-// (GATE_TOOL_SOCKET, default $IM_BRIDGE_HOME/gate/tools.sock).
+// TG 专用包的 MCP 入口。发送一律交给桥（GATE_TOOL_SOCKET，必须给；2026-10-21 起没有默认）。
 const { serve } = require('../_lib/mcp-stdio');
 const { makeTools } = require('./tools');
 

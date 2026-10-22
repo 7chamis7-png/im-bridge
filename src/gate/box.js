@@ -1,68 +1,75 @@
 "use strict";
 
 /**
- * Box — the thing that runs the model CLI.
+ * 盒子 —— 跑 CLI 的那个东西（2026-09-18，Alice定的五条口）
  *
- * The bridge knows nothing about claude (or any other engine). It only knows
- * these five methods:
+ * **桥不认识 claude，也不认识 codex、grok。** 它只认这五条：
  *
- *   1. deliver(envelope)  send one turn in
- *   2. onReply(fn)        get the agent's replies out
- *   3. onTurnDone(fn)     the turn has finished
- *   4. rotate(reason)     start a new session
- *   5. fullness()         how full the context is
+ *   1. deliver(信封)     送一轮进去
+ *   2. onReply(fn)       把他的话拿出来
+ *   3. onTurnDone(fn)    这一轮说完了
+ *   4. rotate(理由)      开个新舱
+ *   5. fullness()        现在多满了
  *
- * Engine-specific work (resume, session rebuild, model fallback, transcript
- * trimming, …) stays inside the box and never leaks into the bridge; that is
- * what "swap the engine without touching the bridge" means.
+ * 那些**只有某一种底座才有的脏活**（claude 的 resume 保温度、forge 把冷层原话
+ * 塞回会话文件、安全层掉档、上下文裁剪；codex 的 rollout-seed 版本锁）
+ * **全部关在盒子里面**，一条都不许漏到桥上。Iris那个盒子装的是它自己的脏活，
+ * 桥这头看到的一模一样 —— 这就是「换底座不动桥」的全部含义。
  *
- * The interface is shaped by what claude needs; other engines implement as much
- * as they can. Real implementations live outside the bridge (`src/host/`).
- * This file holds only the contract, the wiring-time check, and an in-process
- * fake box for tests.
+ * ⚠️ 接口**照 claude 的需要定**，codex 和 grok 能接多少接多少。
+ *    不为了通用而通用：硬做成「什么都能接」的抽象，只会在桥里塞一堆 if。
+ *
+ * 真实现住在桥外面（`src/host/`），因为那是**用桥的人**的事。这个文件只有三样：
+ * 契约、装配时的体检、和一个不起进程的假盒子（测试用）。
  */
 
-/** The five method names. Checked at wiring time. */
+/** 五条口的方法名。装配时照着点名，少一条当场说。 */
 const BOX_CONTRACT = Object.freeze({
-  deliver: "send one turn in",
-  onReply: "get the agent's replies out",
-  onTurnDone: "the turn has finished",
-  rotate: "start a new session",
-  fullness: "how full the context is",
+  deliver: "送一轮进去",
+  onReply: "把他的话拿出来",
+  onTurnDone: "这一轮说完了",
+  rotate: "开个新舱",
+  fullness: "现在多满了",
 });
 
 /**
- * Wiring-time check: does this box implement all five methods?
- * Fail when wiring, not when the first message arrives.
+ * 装配体检：这个盒子五条口齐不齐。
+ *
+ * **在接线那一刻就报，不要等她说话的时候才炸。** 9-17 的教训：
+ * 装配「成功」、测试全绿、开关一开却整条吞掉——因为没人在装配时点过名。
  *
  * @param {object} box
- * @returns {object} the box itself
+ * @returns {object} box 本身（方便 `const b = assertBox(...)` 这么写）
  */
 function assertBox(box) {
-  if (!box || typeof box !== "object") throw new Error("no box given (the bridge cannot deliver turns without one)");
+  if (!box || typeof box !== "object") throw new Error("盒子没给（桥没有盒子就没法把话送进去）");
   const missing = Object.keys(BOX_CONTRACT).filter((k) => typeof box[k] !== "function");
   if (missing.length) {
-    throw new Error("box is missing methods: " + missing.map((k) => `${k} (${BOX_CONTRACT[k]})`).join(", "));
+    throw new Error("盒子缺这几条口：" + missing.map((k) => `${k}（${BOX_CONTRACT[k]}）`).join("、"));
   }
   return box;
 }
 
 /**
- * A turn sent into the box is an envelope (envelope.js). Validation reuses the
- * envelope's own check so there is only one set of rules.
+ * 送进盒子的那一轮 —— **就是一个信封**（envelope.js）。
+ * 校验直接用信封那一份，**不在这儿另写一份**：两套判据迟早各自往下漂，
+ * 而漂的那天谁也不知道到底以哪份为准。
  */
 const { assertEnvelope } = require("./envelope");
 const assertTurnIn = assertEnvelope;
 
 /**
- * Fake box: no process, no cost, answers synchronously. Lets tests run the
- * whole path plugin → gate → box → outbound → plugin end to end in milliseconds.
+ * 假盒子：不起进程、不花钱、同步回答。
+ *
+ * 它存在的理由是**让一整轮对话在两秒内跑完**：现在想验一遍桥，必须真把 claude
+ * 起起来、真等他想、真烧一次额度。有了假盒子，插头 → 闸 → 盒子 → 出闸 → 插头
+ * 这一整条可以在测试里端到端跑，而且想跑几遍跑几遍。
  *
  * @param {object} [o]
  * @param {function} [o.answer]  (envelope) => string | string[] | null
- *        What the agent says. null / "" = the agent chooses silence (not a failure).
- *        An array = several messages (one onReply each).
- * @param {number} [o.fullnessRatio] default 0.1
+ *        他这一轮说什么。返回 null / "" = **他选择不说**（§0.3 的沉默，不是故障）。
+ *        返回数组 = 分几段说（每段一次 onReply）。
+ * @param {number} [o.fullnessRatio] 水位，默认 0.1
  * @param {function} [o.now]
  */
 function makeFakeBox({ answer = () => "嗯", fullnessRatio = 0.1, now = () => Date.now() } = {}) {
@@ -71,11 +78,11 @@ function makeFakeBox({ answer = () => "嗯", fullnessRatio = 0.1, now = () => Da
   let threadId = "fake-thread-1";
   let turnSeq = 0;
   let rotations = 0;
-  /** every delivered turn, for test assertions */
+  /** 进来过的每一轮，测试拿它对账 */
   const seen = [];
 
   return {
-    /** Computes synchronously but still returns a Promise, like a real box. */
+    /** 送一轮进去。**同步算完再回**，但仍然返回 Promise，跟真盒子一个形状。 */
     async deliver(envelope) {
       assertTurnIn(envelope);
       seen.push(envelope);
@@ -85,7 +92,7 @@ function makeFakeBox({ answer = () => "嗯", fullnessRatio = 0.1, now = () => Da
       for (const text of chunks) {
         for (const fn of replyHandlers) fn({ turnId, threadId, text, trace_id: envelope.trace_id, at: now() });
       }
-      // Always emit done, even with zero replies, so downstream learns about silence.
+      // 一轮说完了 —— **一条都没说也要发这个**，否则出闸永远等不到「他不说」这个结论。
       for (const fn of doneHandlers) {
         fn({ turnId, threadId, trace_id: envelope.trace_id, silent: chunks.length === 0, at: now() });
       }
@@ -98,9 +105,9 @@ function makeFakeBox({ answer = () => "嗯", fullnessRatio = 0.1, now = () => Da
       threadId = `fake-thread-${rotations + 1}`;
       return { threadId, reason };
     },
-    fullness() { return { ratio: fullnessRatio, used: Math.round(fullnessRatio * 1000), limit: 1000, model: "(fake box)", threadId }; },
+    fullness() { return { ratio: fullnessRatio, used: Math.round(fullnessRatio * 1000), limit: 1000, model: "(假盒子)", threadId }; },
 
-    // —— fake-box-only helpers for tests ——
+    // —— 下面这些只有假盒子有，给测试对账用 ——
     _seen: seen,
     _rotations: () => rotations,
     _threadId: () => threadId,

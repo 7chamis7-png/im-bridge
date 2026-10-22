@@ -1,17 +1,23 @@
-"use strict";
-
-/**
- * Minimal placeholder substitution for instruction files.
- *
- *   {{USER_NAME}}     config.userName     (default "owner")
- *   {{USER_PRONOUN}}  config.userPronoun  (default "they")
- */
-function renderInstructionTemplate(template, config = {}) {
-  const userName = String(config?.userName || "").trim() || "owner";
-  const pronoun = String(config?.userPronoun || "").trim() || "they";
-  return String(template || "")
-    .replaceAll("{{USER_NAME}}", userName)
-    .replaceAll("{{USER_PRONOUN}}", pronoun);
+function resolveUserPronoun(gender) {
+  const normalized = String(gender || "").trim().toLowerCase();
+  if (normalized === "male" || normalized === "man" || normalized === "m" || normalized === "男") {
+    return "他";
+  }
+  if (normalized === "neutral" || normalized === "nonbinary" || normalized === "nb" || normalized === "ta") {
+    return "TA";
+  }
+  return "她";
 }
 
-module.exports = { renderInstructionTemplate };
+function renderInstructionTemplate(template, config = {}) {
+  const userName = String(config?.userName || "").trim() || "用户";
+  const pronoun = resolveUserPronoun(config?.userGender);
+  return String(template || "")
+    .replaceAll("{{USER_NAME}}", userName)
+    .replaceAll("她", pronoun);
+}
+
+module.exports = {
+  renderInstructionTemplate,
+  resolveUserPronoun,
+};

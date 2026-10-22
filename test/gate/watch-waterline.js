@@ -1,5 +1,5 @@
 "use strict";
-// Watch waterline hooks: 30% waterline (trim/rotate) and 85% high-water closing turn; cooldown, retrySoon, disabled.
+// 守护的两条水位钩子（2026-09-21）：30% 撞线（裁/换）与 85% 收尾；冷却、retrySoon、关掉
 const fs = require("fs"); const os = require("os"); const path = require("path");
 const { makeWatch } = require("../../src/host/watch");
 let pass = 0, fail = 0;
@@ -24,7 +24,7 @@ const tick = async (w) => { w.tick(); await new Promise((r) => setTimeout(r, 5))
   T += 60_000; hb(0.36); await tick(w); check("1 分钟后不再触发", calls.length === 1);
   T += 30 * 60_000; hb(0.37); await tick(w); check("31 分钟后再触发", calls.length === 2);
 
-  console.log("[3] agent 正在说话 → 5 分钟后再看");
+  console.log("[3] 他正在说话 → 5 分钟后再看");
   retry = true; T += 31 * 60_000; hb(0.38); await tick(w); check("触发（返回 retrySoon）", calls.length === 3);
   T += 2 * 60_000; hb(0.38); await tick(w); check("2 分钟后还不看", calls.length === 3);
   T += 4 * 60_000; hb(0.38); await tick(w); check("6 分钟后看了", calls.length === 4);
