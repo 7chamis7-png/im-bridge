@@ -54,6 +54,7 @@ const scrubber = require('../src/box/transcript-scrub');
 const { cutHallucinatedTail } = require('../src/core/hallucination-cut');
 const { claudeToNeutral, NEUTRAL } = require('../src/box/history-claude');
 const { forgeSwitch, boxEngine } = require('../src/box/forge-switch');
+const tailExclude = require('../src/box/tail-exclude');
 const modelRegistry = require('../src/box/model-registry');
 const { personaConfigPath, readPersonaSpec } = require('../src/host/persona-file');
 
@@ -748,6 +749,17 @@ function createImBridgeRuntimeAdapter(config) {
     // 换舱单（见 readRotateTicket 那段）：只在「没号可续」时才用 —— 有号就是续，单子留给真正开新舱那次
     const ticket = !opts.freshToken && !threadId && (engine ? engine !== 'claude-cli' : needsTicket()) ? readRotateTicket() : null;
     const freshToken = opts.freshToken || (ticket ? ticket.token : '');
+    // 2026-10-22 Iris /new 也带底子（Alice：「Iris的 forge 肯定要跟Nova一样」）。
+    // claude 的底子在 sendTurn 里由 forgeOpening 合成进 transcript；codex 的 thread 归 cli 宿主，
+    // 盒子只能把**同一个** buildForgeBaseText 拼出来的料递过去（sdkOptions.forgeBase），插头开新 thread 时
+    // 把它当第一条（她那一侧的）消息垫在暖尾巴前面 —— 跟 claude 合成的新舱同一个形状。
+    // 只在「可能开新 thread」时拼（没号可续）；/engine 换引擎自己带底子（opts.rebuild），这里不再递第二份。
+    // 开关跟 claude 同一个（forgeSwitch：$GATE_ROOT/tools.json 的 forge）。
+    let forgeBase = '';
+    if (!threadId && !opts.rebuild && (engine || engineOf(model)) === 'codex-appserver' && forgeSwitch({ log }).on) {
+      try { forgeBase = buildForgeBaseText(config) || ''; }
+      catch (e) { warn(`底子拼不出来（这次新舱只垫尾巴）：${e.message}`); }
+    }
     launching = (async () => {
       // 台账修剪归 nova-cli（cli-host/server.js）：台账只能有一个活着的拥有者，盒子这头只读。
       // 工作目录里的 .mcp.json 由 CLI 自己读（实测：不传它也会自动加载），这里不碰、也不再写回。
@@ -774,6 +786,7 @@ function createImBridgeRuntimeAdapter(config) {
         ...(threadId ? { resume: threadId } : {}),
         ...(freshToken ? { freshThread: freshToken } : {}),
         ...(opts.rebuild ? { rebuild: opts.rebuild } : {}),
+        ...(forgeBase ? { forgeBase } : {}),
         // 登记表里引擎那一家要的东西（只给对应的插头用；Claude 那根在宿主里会剥掉）
         ...(entry && entry.codexConfig ? { codexConfig: entry.codexConfig } : {}),
         ...(entry && entry.engine === 'openai-chat' ? { engineCreds: { secret: entry.secret || '', baseUrl: entry.baseUrl || '' } } : {}),
@@ -802,6 +815,15 @@ function createImBridgeRuntimeAdapter(config) {
         const sid = text(rt.status().sessionId);
         if (sid) liveEntry.threadId = sid;
         log(`换舱单 ${freshToken.slice(0, 8)} 已用：新 thread=${sid ? sid.slice(0, 13) : '(还没报)'}`);
+      }
+      // codex 插头报回来它这次真垫了底子（开了新 thread 才会垫；续上旧的就没用上）：点一遍名，跟 claude 那条日志同一个口径
+      const forged = (() => { try { return rt.status().forged || null; } catch { return null; } })();
+      if (forgeBase && forged && forged.base) {
+        try {
+          const d = describeForgeBase(config);
+          log(`forge/codex 底子 ${d.sections.length} 段 ${d.total} 字（实交 ${forged.baseChars} 字${forged.omitted && forged.omitted.length ? `，${forged.omitted.join('/')} 已在开发者指令里、没再带` : ''}，${forged.via}）：`
+            + d.sections.map((x) => `${x.name}(${x.chars})`).join(' · '));
+        } catch { /* 点名失败不挡 */ }
       }
       return liveEntry;
     })();
@@ -967,6 +989,8 @@ function createImBridgeRuntimeAdapter(config) {
           droppedTurns: receipt.droppedTurns, source: receipt.source, degraded: receipt.degraded }) + '\n', { mode: 0o600 });
       } catch (e) { warn(`[换引擎] 流水写不进去（不挡）：${e.message}`); }
       log(`[换引擎] ${fromEngine}/${fromModel} → ${to.engine}/${to.id} 新舱 ${sid.slice(0, 13)}，垫了 ${receipt.turns} 轮（${receipt.source}），用时 ${receipt.ms}ms`);
+      { const c = tailExclude.consumeTailExclude(undefined, { usedBy: `engine-switch/${to.engine}`, threadId: sid });
+        if (c.used) log(`[换引擎] 用掉了排除名单（${c.used} 条），已清空`); }
       let base = null;
       try { base = describeForgeBase(config); } catch { /* 点名失败不挡 */ }
       return { workspaceRoot: ws, clearedBindings, base, threadId: sid, engineSwitch: receipt };
@@ -1048,6 +1072,9 @@ function createImBridgeRuntimeAdapter(config) {
             });
             if (r.ok) {
               threadId = r.sid;
+              // 她在面板上勾掉的那几轮这次已经没带进来 → 名单用掉了，清空（只对下一次生效），记一笔
+              { const c = tailExclude.consumeTailExclude(undefined, { usedBy: 'forge/claude', threadId: r.sid });
+                if (c.used) log(`forge 用掉了排除名单（${c.used} 条），已清空`); else if (c.error) warn(`排除名单清不掉: ${c.error}`); }
               const d = describeForgeBase(config);
               const inj = d.injection ? ` 注入 ${d.injection.sha256.slice(0, 12)}(${d.injection.bytes}B ${d.injection.mtime.slice(0, 10)})` : ' 注入 无';
               log(`forge opening sid=${r.sid.slice(0, 8)} tail=${r.tailCount}${r.tailSource && r.tailSource !== 'cold' ? ` 料源=${r.tailSource}` : ''} 底子 ${d.sections.length} 段 ${d.total} 字：`
@@ -1104,7 +1131,11 @@ function createImBridgeRuntimeAdapter(config) {
           message: { type: 'user', message: { role: 'user', content }, parent_tool_use_id: null, origin: { kind: 'human' } } });
       } catch (e) {
         turns.delete(uuid);
-        e.notAccepted = true;       // 没落盘 = 确定没送进去，盒子可以放心重试
+        // 没落盘 = 确定没送进去，盒子可以放心重试。
+        // 2026-10-22 例外：请求已经写出去、等回话时超时/断线（client.js 打的 maybeAccepted）——
+        // 对面可能已经落盘，不打 notAccepted，让桥记 unknown、推给她用 /pending 决定，
+        // 免得桥的自动重投让他把同一句回两遍（生产死信里 10-09 那 3 条就是这种）。
+        if (!e || e.maybeAccepted !== true) e.notAccepted = true;
         throw e;
       }
 

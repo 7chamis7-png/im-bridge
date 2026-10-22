@@ -60,7 +60,8 @@ Object.assign(process.env, { HOME: root, PATH: `${bin}:${process.env.PATH}`, GAT
   FORGE_STATE_FILE: path.join(root, "forge-state.json"), FORGE_PREPARED_FILE: path.join(root, "forge-prepared.json"),
   FAKE_CODEX_LOG: rpcFile, FAKE_CODEX_ROLLOUT_DIR: rolloutDir, NOVA_CLI_SOCKET: path.join(root, "cli.sock"),
   GATE_COLD_FILE: path.join(root, "cold.jsonl"), OUTWARD_TZ: "Asia/Shanghai", OUTWARD_LOCALE: "zh-CN",
-  CODEX_COMMAND: FAKE, CODEX_AUTH_FILE: auth, CODEX_HOME_DIR: root, GATE_ENGINE_SWITCH_MIN_TURNS: "1" });
+  CODEX_COMMAND: FAKE, CODEX_AUTH_FILE: auth, CODEX_HOME_DIR: root, CODEX_HOME: path.join(root, "codex-home"),
+  NOVA_STATE_DIR: path.join(root, "state-dir"), GATE_ENGINE_SWITCH_MIN_TURNS: "1" });
 for (const k of ["GATE_HISTORY", "FORGE_ENABLED", "GATE_MODEL", "GATE_ENGINE", "DEEPSEEK_ALLOW_BILLING", "GATE_BOX_CONTEXT_LIMIT"]) delete process.env[k];
 
 const dsCalls = [];

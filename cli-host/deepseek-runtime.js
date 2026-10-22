@@ -138,10 +138,11 @@ function readJsonlTail(file, maxBytes) {
 }
 
 /** 冷层只在 DeepSeek 自己还没有对话时垫一层，避免一插上就失忆。只读尾巴，不回写。 */
-function coldSeed(file, { maxMessages = 16, maxChars = 6000 } = {}) {
+function coldSeed(file, { maxMessages = 16, maxChars = 6000, skip = null } = {}) {
   if (!file) return [];
   const rows = readJsonlTail(file, 160 * 1024)
     .filter((row) => validTurn({ role: row.role, content: row.text }))
+    .filter((row) => !(typeof skip === 'function' && skip(row)))   // 她在面板上勾掉的轮（tail-exclude.json）
     .map((row) => ({ role: row.role, content: String(row.text).trim() }));
   const kept = [];
   let chars = 0;

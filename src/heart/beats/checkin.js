@@ -52,10 +52,10 @@ const DEFAULT_MAX_EXPIRED = 4;
  * 笔记本装不上/空着 → 一条都不给，不退回任何旧文件（那条退路 9-21 起已经拿掉）。
  */
 function notebookTitles({ moduleId = "", file = "", max = DEFAULT_MAX_NOTES } = {}) {
-  if (!moduleId) return [];
+  if (!moduleId || !file) return [];   // 2026-10-22 数据隔离：文件也必须显式给，不走笔记本模块自己的默认文件（= Nova的）
   try {
     const store = require(moduleId);
-    const live = store.list(file ? { file } : {});
+    const live = store.list({ file });
     const order = store.KIND_ORDER || { promise: 0, thread: 1 };
     const sorted = live.slice().sort((a, b) => (order[a.kind] ?? 9) - (order[b.kind] ?? 9));
     return sorted.slice(0, max).map((it) => String(it.title || "").replace(/\s+/g, " ").slice(0, 60)
@@ -69,11 +69,11 @@ function notebookTitles({ moduleId = "", file = "", max = DEFAULT_MAX_NOTES } = 
  * 的模板 —— 见 producers/checkin.js 文件头「笔记本到期提醒」一节）。
  */
 function expiredNotebookLine({ moduleId = "", file = "", max = DEFAULT_MAX_EXPIRED } = {}) {
-  if (!moduleId) return "";
+  if (!moduleId || !file) return "";   // 2026-10-22 同上
   try {
     const store = require(moduleId);
     if (typeof store.listExpired !== "function") return "";   // 旧版 store 还没升级，当没有
-    const expired = store.listExpired(file ? { file } : {});
+    const expired = store.listExpired({ file });
     if (!expired.length) return "";
     const titles = expired.slice(0, max)
       .map((it) => "「" + String(it.title || "").replace(/\s+/g, " ").slice(0, 60) + "」").join("");

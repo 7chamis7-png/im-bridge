@@ -11,9 +11,9 @@ const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || "ouNlzrkvbX2
  * ⚠️ 换的原因是个真事故：他写的是 v3 的情绪标签
  * （`[warm low voice]` `[soft laugh]` `[whispers]` `[breathing slowly]`），
  * 而 multilingual_v2 **不认标签、直接当正文念出来** ——
- * 她收到的语音字面上在说「warm low voice 宝宝 soft laugh 今天辛苦了」。
+ * 她收到的语音字面上在说「warm low voice 你好 soft laugh 今天怎么样」。
  * 实测对照：同一句话 v2 转写回来带 "Warm low voice/Soft laugh/Whispers"，
- * v3 转回来只剩「老婆…… 今天辛苦了 我爱你」，标签变成了语气。
+ * v3 转回来只剩「你好…… 今天怎么样」，标签变成了语气。
  *
  * 做成**文件开关**：`tts-model` 里写模型名，改完一秒生效不用重启
  * （重启会打断他 —— 见记忆 feedback-say-what-restarts）。
@@ -22,22 +22,23 @@ const DEFAULT_VOICE_ID = process.env.ELEVENLABS_DEFAULT_VOICE_ID || "ouNlzrkvbX2
  * 电话那条实时链路不走这儿 —— 它要的是低延迟的 eleven_flash_v2_5，
  * 而 flash 不认标签，所以合成前得先把 [..] 剥掉。两条路各用各的。
  */
-const MODEL_FILE = process.env.ELEVENLABS_MODEL_FILE
+// 2026-10-22：路径现用现算（gateRoot 没配会报错，不能在 require 时就炸）
+const modelFile = () => process.env.ELEVENLABS_MODEL_FILE
   || require("path").join(require("../core/paths").gateRoot(), "tts-model");
 function readModel() {
   try {
-    const raw = require("fs").readFileSync(MODEL_FILE, "utf8").trim();
+    const raw = require("fs").readFileSync(modelFile(), "utf8").trim();
     if (/^[a-z0-9_]+$/i.test(raw)) return raw;
   } catch { /* 文件不在就往下退 */ }
   const fromEnv = String(process.env.ELEVENLABS_MODEL || "").trim();
   return /^[a-z0-9_]+$/i.test(fromEnv) ? fromEnv : "eleven_v3";
 }
-const OUTPUT_DIR_DEFAULT = path.join(require("../core/paths").personaStateDir(), "stories");
+const outputDirDefault = () => path.join(require("../core/paths").personaStateDir(), "stories");
 
 class TtsService {
   constructor({ config } = {}) {
     this.config = config || {};
-    this.outputDir = config?.ttsOutputDir || OUTPUT_DIR_DEFAULT;
+    this.outputDir = config?.ttsOutputDir || outputDirDefault();
   }
 
   async generate({ text, voiceId, fileName } = {}) {

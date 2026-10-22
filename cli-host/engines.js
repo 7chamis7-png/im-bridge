@@ -31,7 +31,7 @@ const SECRETS_DIR = secretsDir();
 const SECRET_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 
 /** sdkOptions 里只给桥自己看的键：别递给 Claude SDK（它不认）。 */
-const BRIDGE_ONLY_KEYS = ['freshThread', 'codexConfig', 'engineCreds', 'rebuild', 'toolsNote'];
+const BRIDGE_ONLY_KEYS = ['freshThread', 'codexConfig', 'engineCreds', 'rebuild', 'toolsNote', 'forgeBase'];
 
 function envStr(env, name, fallback = '') {
   const v = env[name];
@@ -94,15 +94,18 @@ function createEngineFactories({ env = process.env, stateDir, workspace = '', re
     'codex-appserver': (cfg) => {
       const given = cfg.sdkOptions || {};
       const codexHome = envStr(env, 'CODEX_HOME');
-      if (requireCodexHome && !codexHome) {
-        throw new Error('这个人格没有自己的 CODEX_HOME —— 不许拿 ~/.codex 起 codex（会跟Iris的 thread 混在一起）。'
-          + '先按迁移步骤建好 CODEX_HOME 再换。');
+      // 2026-10-22 数据隔离：所有人格一律要显式 CODEX_HOME（requireCodexHome 参数留着只为兼容旧调用，不再放行）。
+      // 以前没设就拿 ~/.codex —— 同机第二个 codex 人格会跟第一个共用 thread / rollout / 登录。
+      void requireCodexHome;
+      if (!codexHome) {
+        throw new Error('这个人格没有自己的 CODEX_HOME —— 不许拿 ~/.codex 起 codex（会跟别的人格混在一起）。'
+          + '在 <id>-env.sh 里写 CODEX_HOME=…，再 CODEX_HOME=… codex login。');
       }
       return makeCodex({
         ...cfg,
         cwd: cfg.cwd || workspace,
         threadFile: path.join(stateDir, 'codex-thread.json'),
-        authFile: envStr(env, 'CODEX_AUTH_FILE', codexHome ? path.join(codexHome, 'auth.json') : homePath('.codex', 'auth.json')),
+        authFile: envStr(env, 'CODEX_AUTH_FILE', path.join(codexHome, 'auth.json')),
         codexPath: envStr(env, 'CODEX_COMMAND', envStr(env, 'GATE_CODEX_COMMAND', '/usr/local/bin/codex')),
         home: envStr(env, 'CODEX_HOME_DIR', homeDir(env)),
         codexHome,

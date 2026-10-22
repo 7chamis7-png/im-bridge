@@ -25,6 +25,7 @@ const { makeOutlet } = require("./outlet");
 const { makeUndelivered } = require("./undelivered");
 const { makeCommands } = require("./commands");
 const { makeTurnQueue } = require("./turn-queue");
+const { makePendingDesk } = require("./pending");
 const path = require("path");
 
 /**
@@ -99,7 +100,7 @@ function envelopeFromEvent(event, { producer = "" } = {}) {
  */
 function makePipeline({ plugins, inbound, outbound, box, router, media = null, undelivered = null,
   groups = null, owner = "alice", binding = null, enabled = () => true, log = () => {},
-  closingNote = null }) {
+  closingNote = null, retry = {} }) {
   if (!plugins || typeof plugins.get !== "function") throw new Error("主循环要一份「渠道名 → 插头」的表");
   if (!box) throw new Error("主循环要一个盒子（没有盒子，话送不进去也拿不出来）");
   if (!router) throw new Error("主循环要一个路由（没有路由，他的话不知道发给谁）");
@@ -124,6 +125,8 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     undelivered: () => undelivered,
     held: () => held.slice(),
     lastSeen: () => inbound.store.lastSeen(),
+    // 2026-10-22：/status 多一行「卡住 / 拒收待重投 / 死信 / 待核对」各几条（N10）。
+    backlog: () => desk.counts(),
     // 关舱前先送一轮进去，**等他做完再换**（2026-09-19）。
     // ⚠️ **桥不认识那一轮里写的是什么**（铁律 2/3）：正文由宿主给（`closingNote`），
     // 桥只负责「换舱之前先 push 一轮、等它跑完」。不给就没有这一步，照旧直接换。
@@ -140,7 +143,7 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
   const held = [];
   const stats = { in: 0, blocked: 0, out: 0, silent: 0, heldCount: 0, failed: 0 };
   const queue = makeTurnQueue({
-    file: path.join(inbound.store.root, "turns.json"), box, binding, enabled, log,
+    file: path.join(inbound.store.root, "turns.json"), box, binding, enabled, log, retry,
     // 重启后「提交了但没等到回执」的那些，用出站账本当证据自动认掉能认的那一半：
     // 出站账本里只要有这一轮的操作，就说明盒子对这一轮产出过回复（`outbox.create`
     // 发生在 onReply → deliver 的路上）。查不到就原样留着等人核对，绝不反向判「没跑」。
@@ -209,6 +212,27 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
   });
 
   let ingestTail = Promise.resolve();
+  /** 挂过的腿的死信文件（渠道 → 死信）。/pending 要列它们、按原件重投（2026-10-22）。 */
+  const deadLetters = new Map();
+  const desk = makePendingDesk({
+    queue, undelivered: () => undelivered, outbound, router, plugins, inboundStore: inbound.store,
+    deadLetters: () => listDeadLetters(),
+    // ⚠️ 用 _ingest 不用 ingest：/pending 本身就是在入站那条串行道里跑的命令，
+    // 再排进同一条道会自己等自己（死锁）。
+    reingest: (input) => api._ingest(input),
+    log,
+  });
+  /** 挂过的 + 账本目录里现成的 dead-*.jsonl（换了腿、这次没挂的那条腿的死信也要看得见）。 */
+  function listDeadLetters() {
+    const out = new Map(deadLetters);
+    try {
+      for (const f of require("fs").readdirSync(inbound.store.root)) {
+        const m = /^dead-(.+)\.jsonl$/.exec(f);
+        if (m && !out.has(m[1])) out.set(m[1], makeDeadLetter({ file: path.join(inbound.store.root, f) }));
+      }
+    } catch { /* 目录读不了就只报挂过的 */ }
+    return out;
+  }
   const api = {
     // All channels use the same preparation/numbering lane. Media latency cannot
     // let another input overtake this one inside the bridge.
@@ -316,7 +340,20 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       const env = envelopeFromEvent(res.event);
       // A duplicate registration does not prove the box accepted the task.
       if (who === owner) router.noteInbound(env);
-      const result = await queue.submit(env, router.resolve({ replyTo: env }));
+      // 2026-10-22（N1）：submit 抛错时，只要这一行已经落进 turns.json，就**不再抛给收信人**。
+      // 以前抛出去 → 收信人当「没消化成」进死信 → 游标照走，而轮次那行是 rejected、没人再捡，
+      // 冷层里却已经有了她这句（inbound.accept 在上面就写了）—— 她的话两头都悬着。
+      // 现在落了盘的由队列自己负责：notAccepted 自动重投，unknown 堵住队列 + 守护推给她 + /pending 处理。
+      // 没落盘（ensure 本身写不进去）的照旧抛：那种只有死信里还留着原件。
+      let result;
+      try {
+        result = await queue.submit(env, router.resolve({ replyTo: env }));
+      } catch (e) {
+        const row = queue.store.get(env.trace_id);
+        if (!row) throw e;
+        log(`[主循环] ${row.id} 交给盒子没成（${row.state}），已在轮次账本里，不进死信：${(e && e.message) || e}`);
+        result = { taskId: row.id, queued: true, state: row.state, reason: String((e && e.message) || e) };
+      }
       if (groupBatch && typeof groups.ackUnread === "function") {
         groups.ackUnread(delivery, groupBatch.map((item) => item.nativeId).filter(Boolean));
       }
@@ -330,6 +367,57 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
      * 否则「他自己想说话」这种也会被静默窗挡掉，而那不该挡。
      */
     push: pushSystem,
+
+    /**
+     * 本机控制口（面板）替她下一条命令（2026-10-22）。**跟她在 TG 里发是同一条路**：
+     * 同一张命令表（commands.match → commands.run，/new 就是那个 /new，收尾轮 → 换舱一步不少）、
+     * 同一条串行道（ingestTail —— TG 的命令也是在这条道里跑，所以两边同时按不会叠在一起换两次）。
+     * 唯一的差别是没有「她说话那条腿」可以原路回：先垫的那句和回执都走 tellOwner（她最近活跃的那条路），
+     * 跟水位自动换舱的回执同一个口子。
+     *
+     * 身份 = 主人：这个口只开给本机（unix socket 0600），能连上的就是机器主人本人那一侧；
+     * 不认识的命令 / 不是命令形状的话**一律不进盒子**（这里不是跟他说话的入口）。
+     * @returns {Promise<{ok:boolean, command?:string, text:string, notCommand?:boolean}>}
+     */
+    runOwnerCommand(text, { by = "control", onStart = null } = {}) {
+      // 2026-10-22：可以给一串（面板「换舱 + 换模型」= /new 再 /model），**同一个串行道位置里连着跑**，
+      // 中间不让她的话 / 别的命令插进来；前一条没成后面的就不跑。回执等整串跑完再一条条推给她。
+      const texts = Array.isArray(text) ? text : [text];
+      const cmds = texts.map((t) => commands.match(t));
+      const bad = cmds.findIndex((c) => !c);
+      if (!texts.length || bad >= 0) {
+        return Promise.resolve({ ok: false, notCommand: true, text: "不认识的命令：" + String(texts[Math.max(0, bad)] || "").slice(0, 40), steps: [] });
+      }
+      const p = ingestTail.then(async () => {
+        if (typeof onStart === "function") { try { onStart(cmds[0]); } catch { /* 只是报进度 */ } }
+        const replies = [];
+        // 慢命令（/engine）先垫的那句「排上了」当场发：她要马上知道
+        const say = async (t) => {
+          try { await api.tellOwner(t, { by }); } catch (e) { log("[命令·" + by + "] 先垫的那句发不出去：" + ((e && e.message) || e)); }
+        };
+        const steps = [];
+        for (const cmd of cmds) {
+          log(`[命令·${by}] 主人（${owner}）经本机控制口下了 /${cmd.name}${cmd.rest ? " " + cmd.rest.slice(0, 40) : ""}`);
+          const out = await commands.run(cmd, { say });
+          stats.commands = (stats.commands || 0) + 1;
+          const hasButtons = Array.isArray(out.buttons) && out.buttons.length;
+          replies.push((out.text || "") + (hasButtons ? buttonsAsText(out.buttons) : ""));
+          steps.push({ command: cmd.name, rest: cmd.rest, ok: out.ok !== false, text: out.text || "" });
+          if (out.ok === false) break;
+        }
+        for (const body of replies) {
+          if (!body.trim()) continue;
+          try { await api.tellOwner(body, { by }); }
+          catch (e) { log("[命令·" + by + "] 回执发不出去：" + ((e && e.message) || e)); }
+        }
+        const ran = steps.length === cmds.length;
+        const ok = ran && steps.every((x) => x.ok);
+        if (!ran) steps.push(...cmds.slice(steps.length).map((c) => ({ command: c.name, rest: c.rest, ok: false, skipped: true, text: "前一条没成，这条没跑" })));
+        return { ok, command: steps.map((x) => x.command).join("+"), text: steps.map((x) => x.text).filter(Boolean).join("\n"), steps };
+      });
+      ingestTail = p.catch(() => {});
+      return p;
+    },
 
     /** 桥自己有话跟她说（水位裁剪/自动换舱的回执）。走她最近活跃的那条路，不进盒子、不进冷层。 */
     async tellOwner(text, { by = "bridge" } = {}) {
@@ -370,6 +458,8 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
       return row ? { threadId: row.threadId || "", turnId: row.turnId || "" } : null;
     },
     tasks: () => queue.store.list(),
+    /** 卡住 / 拒收 / 死信 / 没送到 的总台（/pending 用；见 pending.js）。 */
+    pending: desk,
     recover: () => queue.recover(),
     reconcile: (id, evidence) => queue.reconcile(id, evidence),
     async stop() {
@@ -395,10 +485,12 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
     attach({ channel, cursorFile, deadLetterFile, enabled = () => true, log: legLog = log }) {
       const plugin = plugins.get(channel);
       if (!plugin) throw new Error("没有这个渠道的插头：" + channel);
+      const deadLetter = makeDeadLetter({ file: deadLetterFile });
+      deadLetters.set(channel, deadLetter);
       return makeReceiver({
         plugin,
         cursor: makeCursorStore({ file: cursorFile }),
-        deadLetter: makeDeadLetter({ file: deadLetterFile }),
+        deadLetter,
         log: legLog, enabled,
         // 一条原始记录怎么消化 = 走主循环。**抛错才算没消化成**（进死信）；
         // 「认不出人挡下了」不抛错 —— 那是处理完了的结论，不是故障。

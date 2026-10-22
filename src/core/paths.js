@@ -36,16 +36,22 @@ function secretsDir(env = process.env) {
   return v || path.join(homeDir(env), ".secrets");
 }
 
-/** 这个人格的数据目录（老名字 NOVA_STATE_DIR，没给 = ~/.nova，跟以前一样）。 */
+/**
+ * 这个人格的数据目录（老名字 NOVA_STATE_DIR）。
+ * 2026-10-22 数据隔离：**没给就报错，不再回落 ~/.nova**。以前Iris的进程没配这一项，
+ * forge 状态 / 身体历史 / TTS 输出就悄悄落进了另一个人格的目录。
+ */
 function personaStateDir(env = process.env) {
   const v = String(env.NOVA_STATE_DIR || "").trim();
-  return v || path.join(homeDir(env), ".nova");
+  if (!v) throw new Error("没设 NOVA_STATE_DIR（这个人格的数据目录）—— 不回落到别人的目录，去 <id>-env.sh 里写上");
+  return v;
 }
 
-/** 桥目录（GATE_ROOT）。只给「没配也得有个去处」的边角用；主进程照旧必须显式给。 */
-function gateRoot(env = process.env, fallbackName = ".nova-gate") {
+/** 桥目录（GATE_ROOT）。2026-10-22 数据隔离：没给就报错，不再回落 ~/.nova-gate。 */
+function gateRoot(env = process.env) {
   const v = String(env.GATE_ROOT || "").trim();
-  return v || path.join(homeDir(env), fallbackName);
+  if (!v) throw new Error("没设 GATE_ROOT（这个人格的桥目录）—— 不回落到别人的目录，去 <id>-env.sh 里写上");
+  return v;
 }
 
 /** Claude Code 的项目目录名：工作目录里的 / 换成 -（/root/nova → -root-nova）。 */

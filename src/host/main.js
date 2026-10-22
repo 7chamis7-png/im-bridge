@@ -36,6 +36,7 @@ const { buildSharedCapabilities } = require("./gate-capabilities");
 const { buildClosingNote } = require("../producers/closing-turn");
 const { loadLegs } = require("../gate/plugins");
 const { makeToolSocket } = require("../gate/tool-socket");
+const { makeControlSocket } = require("../gate/control-socket");
 const { renderToolServers } = require("../toolbox/render");
 const { readPersonaSpec } = require("./persona-file");
 const { homePath, secretsDir, personaStateDir } = require("../core/paths");
@@ -201,7 +202,8 @@ function readConfig(env = process.env) {
     // ⚠️ 2026-09-20 发现：9-18 切盒子时这几条路径没搬过来，他换舱等于裸着醒（底子只剩承诺一段）。
     memoryDir: env.GATE_MEMORY_DIR || personaStateDir(env),
     // IB 身份注入那份文本（老桥 CYBERBOSS_IDENTITY_INJECTION_FILE 的默认值）
-    identityInjectionFile: env.GATE_IDENTITY_INJECTION_FILE || homePath("identity-brain-v02", "injection.txt"),
+    // 2026-10-22 数据隔离：没给就不拼（以前回落 ~/identity-brain-v02 = Nova那份）
+    identityInjectionFile: env.GATE_IDENTITY_INJECTION_FILE || "",
     gateEnabledFile: env.GATE_ENABLED_FILE || path.join(root, ".gate-enabled"),
     heartbeatFile: env.GATE_HEARTBEAT_FILE || path.join(root, "heartbeat.json"),
     heartbeatMs: Number(env.GATE_HEARTBEAT_MS || 15_000),
@@ -396,6 +398,13 @@ async function assemble({ cfg, backend, runtime, box, remoteBox = null }) {
     // 关舱前那一轮（2026-09-19 Alice拍板）：让他自己把笔记本、她这一舱说过的要求、
     // 对她近况的判断过一遍 —— 换舱之后只有这几样跟得过去。桥只管 push，文案在这儿。
     closingNote: ({ reason }) => buildClosingNote({ reason, selfFile: selfFileName(cfg) }),
+    // 2026-10-22：盒子明确拒收（确定没送进去）之后自动重投：默认 5 次、5 秒起翻倍、封顶 5 分钟，
+    // 用完转「卡住」+ 守护推给她。没配的键用默认（turn-queue.js RETRY_DEFAULTS）。
+    turnRetry: Object.fromEntries(Object.entries({
+      maxAttempts: Number(process.env.GATE_TURN_RETRY_MAX) || 0,
+      baseMs: Number(process.env.GATE_TURN_RETRY_BASE_MS) || 0,
+      capMs: Number(process.env.GATE_TURN_RETRY_CAP_MS) || 0,
+    }).filter(([, v]) => v > 0)),
     enforceEnabled: true,
     plugins: pluginSlots,
     identities: {
@@ -424,6 +433,27 @@ async function assemble({ cfg, backend, runtime, box, remoteBox = null }) {
     binding: gate.binding,
     activeTurn: () => gate.pipe.activeTurn(),
     addressOn: (ch) => gate.router.addressOn(ch),
+    log,
+  });
+
+  // ——— 本机控制口（2026-10-22）：面板替她按 /new，走的就是她在 TG 发 /new 那条路 ———
+  // 不复用工具口（那是他的嘴，他自己的工具不该能给自己换舱），单开一个 0600 的 control.sock。
+  // 只收白名单里的命令（new / model / engine，model 和 engine 只收登记表里的 id），以主人身份跑，回执照 TG 那样推给她。
+  // 见 src/gate/control-socket.js。
+  const controlSocket = makeControlSocket({
+    file: path.join(cfg.root, "control.sock"),
+    run: (text, opts) => gate.pipe.runOwnerCommand(text, opts),
+    parse: (text) => gate.pipe.commands.match(text),
+    // /model /engine 只收这个人登记表（$GATE_ROOT/models.json，跟 TG /model 弹的同一份）里有的 id
+    validate: (name, rest) => {
+      if (name !== "model" && name !== "engine") return "";
+      const registry = require("../box/model-registry");
+      const env = { ...process.env, GATE_ROOT: cfg.root };
+      const reg = registry.loadModelRegistry({ file: registry.modelsFile(env), env });
+      if (!reg.ok) return "模型登记表读不了：" + ((reg.errors && reg.errors[0]) || reg.file || "?");
+      return registry.lookup(reg, rest) ? "" : `登记表里没有「${rest}」`;
+    },
+    owner: cfg.ownerName,
     log,
   });
 
@@ -490,13 +520,15 @@ async function assemble({ cfg, backend, runtime, box, remoteBox = null }) {
   const added = backend.commands(gate.pipe.commands, {
     runtime, box, workspaceRoot: cfg.workspaceRoot,
     gateRoot: cfg.root, pauseIntake, resumeIntake,
+    // 2026-10-22：/pending 的总台（卡住 / 拒收 / 死信 / 没送到）住在桥里，命令名住在这包里
+    pending: gate.pipe.pending || null,
     // ⚠️ 2026-09-18 补：原来没传这个，于是 `/undo` 和 `/stop` 拿到的会话号永远是空串
     //（默认值 `() => ""`），按下去只会回「现在没有在跑的会话」。命令本身没错，
     // 是装配这儿漏了一个参数 —— 又一次「形状对得上、就是没人接线」。
     threadId: () => { try { return (box && box.fullness() || {}).threadId || ""; } catch { return ""; } },
   });
 
-  return { gate, box, runtime, remoteBox, commandsAdded: added, legs, idle, toolSocket, mcpFile, intake };
+  return { gate, box, runtime, remoteBox, commandsAdded: added, legs, idle, toolSocket, controlSocket, mcpFile, intake };
 }
 
 /**
@@ -540,7 +572,7 @@ async function main() {
     + " = " + cfg.ownerName);
   log("群：" + (cfg.groupsAllowed.length ? cfg.groupsAllowed.join(" ") : "（没配，不收群消息）"));
 
-  const { gate, commandsAdded, box, runtime, legs, idle, toolSocket, intake } = await buildEverything(cfg);
+  const { gate, commandsAdded, box, runtime, legs, idle, toolSocket, controlSocket, intake } = await buildEverything(cfg);
   log("腿：" + (legs.map((l) => l.name).join(" + ") || "（一条都没插上）")
     + (idle.length ? "   没插上：" + idle.map((i) => i.name + "(" + i.why + ")").join(" ") : ""));
   const pre = gate.preflight();
@@ -630,6 +662,8 @@ async function main() {
 
   await toolSocket.start();
   log("工具口：" + [...toolSocket.tools.keys()].join(" ") + "（他调工具时，桥替他发）");
+  // 控制口起不来不拦起桥：面板上换舱按钮会报「连不上」，TG 的 /new 照常
+  try { await controlSocket.start(); } catch (e) { log("控制口起不来（面板换舱用不了，TG /new 不受影响）：" + ((e && e.message) || e)); }
 
   const startedAt = Date.now();
   // 每条插上的腿各挂一个收信循环。**怎么捞由插头自己说**（poll）：
@@ -706,8 +740,22 @@ async function main() {
         gate.pipe.push({ text: buildClosingNote({ reason: "水位 " + pct + "%", mode: "highwater", selfFile: selfFileName(cfg) }), producer: "换舱收尾·水位" })
           .catch((e) => log("[守护] 水位线收尾没推出去：" + ((e && e.message) || e)));
       },
-      // 说给谁是宿主的事。现在先落日志；接她的 TG 是下一步。
-      notify: (m) => log(m.replace(/\n/g, " | ")),
+      // 说给谁是宿主的事。日志照写；2026-10-22 起另外推一句人话到她手机（push-notify，掉档提醒那个 bot），
+      // 同一类 1 小时最多推一次。没配推送（token/chat_id 读不到）就只写日志。见 watch-notify.js。
+      notify: (() => {
+        const { makeWatchNotify } = require("./watch-notify");
+        const { makeTelegramPush, readBotSecret } = require("./push-notify");
+        const secretFile = process.env.GATE_NOTIFY_BOT_SECRET || path.join(secretsDir(), "ib-notify-bot.secret");
+        const chatId = process.env.GATE_NOTIFY_CHAT_ID || "";
+        const sec = readBotSecret(secretFile);
+        const configured = Boolean(sec.token && (chatId || sec.chatId));
+        if (!configured) log("[守护] 没配推送（" + secretFile + " 读不到 token/chat_id），告警只写日志");
+        return makeWatchNotify({
+          push: configured ? makeTelegramPush({ secretFile, chatId, log }) : null,
+          log, prefix: "桥（" + path.basename(cfg.root) + "）",
+          throttleMs: Number(process.env.GATE_WATCH_PUSH_THROTTLE_MS) || undefined,
+        });
+      })(),
       log,
     });
     watchTimer = setInterval(() => {
@@ -723,6 +771,7 @@ async function main() {
     log("收到 " + sig + "，停腿，不再捞新的。");
     for (const { leg } of running) { try { leg.stop(); } catch { /* 停不掉也要往下走 */ } }
     try { await toolSocket.stop(); } catch { /* 关不掉也要往下走 */ }
+    try { await controlSocket.stop(); } catch { /* 关不掉也要往下走 */ }
     clearInterval(maintenance);
     if (watchTimer) clearInterval(watchTimer);
     // 正在说的那一轮让它说完 —— 腰斩比晚几秒糟得多

@@ -34,7 +34,10 @@ test("registered input retries an explicitly rejected box without losing or dupl
   const box = makeFakeBox(); const original = box.deliver; let attempts = 0;
   box.deliver = async (e) => { if (++attempts === 1) throw Object.assign(new Error("offline"), { notAccepted: true }); return original(e); };
   const { gate, root } = build({ box });
-  await assert.rejects(gate.pipe.ingest({ channel: "telegram", raw: raw(1) }), /offline/);
+  // 2026-10-22：拒收不再抛给收信人（那会进死信、没人再捡）—— 行已落进 turns.json，队列自己退避重投。
+  const first = await gate.pipe.ingest({ channel: "telegram", raw: raw(1) });
+  assert.equal(first.state, "rejected");
+  assert.match(first.reason, /offline/);
   await gate.pipe.ingest({ channel: "telegram", raw: raw(1) });
   assert.equal(attempts, 2);
   assert.equal(read(path.join(root, "cold.jsonl")).filter((r) => r.role === "user").length, 1);

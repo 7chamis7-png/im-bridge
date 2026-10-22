@@ -46,8 +46,10 @@ function formatWhen(iso, now = new Date()) {
  *                                    宿主注入 —— **桥不认识「收尾」是什么**，它只知道
  *                                    换舱之前要先 await 一个宿主给的钩子。
  * @param {function} [o.lastSeen] () => { [channel]: { in?, out? } } 每条腿最后一次真收 / 真发（ISO）
+ * @param {function} [o.backlog]  () => { stuck, rejected, dead, check } 待处理总台的数（pending.js）
  */
-function makeCommands({ box, stats = null, undelivered = null, held = null, beforeRotate = null, lastSeen = null } = {}) {
+function makeCommands({ box, stats = null, undelivered = null, held = null, beforeRotate = null, lastSeen = null,
+  backlog = null } = {}) {
   const table = new Map();
 
   /**
@@ -137,6 +139,15 @@ function makeCommands({ box, stats = null, undelivered = null, held = null, befo
       lines.push(sum.total
         ? `📬 没送到 ${sum.total} 条：可以重来 ${sum["可以重来"]}、等人核对 ${sum["等人核对"]}`
         : "📬 没送到 0 条");
+    }
+    // 2026-10-22（N10）：卡住 / 拒收待重投 / 死信 / 待核对 —— 以前这几样 /status 一个字都不报，
+    // 生产死信里躺了她 4 句话两个礼拜没人知道。有一条不是 0 就提示去 /pending。
+    let b = null;
+    try { b = backlog && backlog(); } catch { b = null; }
+    if (b) {
+      const any = (b.stuck || 0) + (b.rejected || 0) + (b.dead || 0) + (b.check || 0);
+      lines.push(`🧯 卡住 ${b.stuck || 0} · 拒收待重投 ${b.rejected || 0} · 死信 ${b.dead || 0} · 待核对 ${b.check || 0}`
+        + (any ? "（发 /pending 看）" : ""));
     }
     const h = held && held();
     if (h) lines.push(`⏸️ 暂存 ${h.length} 条${h.length ? "（当时找不到落点）" : ""}`);

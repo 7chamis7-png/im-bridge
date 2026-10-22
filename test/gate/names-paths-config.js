@@ -24,7 +24,9 @@ function probe(env) {
     const reg = require(R + "/src/toolbox/registry");
     const eng = require(R + "/cli-host/engines");
     console.log(JSON.stringify({
-      secrets: p.secretsDir(), state: p.personaStateDir(), gate: p.gateRoot(),
+      secrets: p.secretsDir(),
+      state: (() => { try { return p.personaStateDir(); } catch (e) { return "THROW"; } })(),
+      gate: (() => { try { return p.gateRoot(); } catch (e) { return "THROW"; } })(),
       proj: p.claudeProjectDir("/root/nova"), notebook: reg.CODE_DEFAULTS.NOVA_NOTEBOOK_HOME, engSecrets: eng.SECRETS_DIR,
       owner: n.ownerDisplayName(), agent: n.agentDisplayName(), alert: n.agentAlertName(),
       wake: require(R + "/src/gate/group").WAKE_NAMES,
@@ -38,8 +40,9 @@ console.log("\n[1] 不给 env：跟生产原来写死的一样");
 const a = probe({ HOME: "/root" });
 check("钥匙柜", a.secrets, "/root/.secrets");
 check("插头表的钥匙柜", a.engSecrets, "/root/.secrets");
-check("人格数据目录", a.state, "/root/.nova");
-check("桥目录兜底", a.gate, "/root/.nova-gate");
+// 10-22 数据隔离：人格数据目录 / 桥目录没给就报错，不再回落 ~/.nova / ~/.nova-gate
+check("人格数据目录没给 → 报错不回落", a.state, "THROW");
+check("桥目录没给 → 报错不回落", a.gate, "THROW");
 check("会话记录目录", a.proj, "/root/.claude/projects/-root-nova");
 check("笔记本代码", a.notebook, "/root/nova-notebook");
 check("主人", a.owner, "Alice");

@@ -159,7 +159,8 @@ const end = (text) => ({ ...tplEnd, uuid: uid(), result: text });
   check("料源=全本，对账一致", pick.source === "history" && pick.reconcile && pick.reconcile.ok);
   const texts = pick.tail.map((t) => t.text);
   check("尾巴里没有被拒的那句", !texts.some((t) => t.includes("FAILSEND")));
-  check("尾巴里有工具发的那段、有 [本轮未回复]、幻觉尾巴是切过的", texts.includes("这是工具发的那段") && texts.includes("[本轮未回复]")
+  // 2026-10-22（Fable N6）：[本轮未回复] 是对账占位符，不是他说的 —— 冷层照记，进尾巴前剔掉（src/core/not-his-words.js）
+  check("尾巴里有工具发的那段、没有 [本轮未回复]、幻觉尾巴是切过的", texts.includes("这是工具发的那段") && !texts.includes("[本轮未回复]")
     && texts.some((t) => t.trim() === "好梦"));
   check("心脏推的那条不在尾巴里（冷层口径），他回的那句在", !texts.some((t) => t.includes("该问候她了")) && texts.includes("醒了想你"));
   const coldOnly = forge.buildTailFromCold({ conversationSourceFile: path.join(dir, "cold.jsonl"), workspaceRoot: WS });

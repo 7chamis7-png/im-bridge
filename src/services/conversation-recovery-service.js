@@ -1,5 +1,7 @@
 "use strict";
 
+const { isNotHisWords } = require("../core/not-his-words");
+
 const fs = require("fs");
 
 const { OUTWARD_TZ, OUTWARD_LOCALE } = require("../core/outward-tz");
@@ -116,6 +118,7 @@ class ConversationRecoveryService {
         try {
           const record = JSON.parse(line);
           if (record.role !== "user" && record.role !== "assistant") continue;
+          if (isNotHisWords(record)) continue;   // 2026-10-22：沉默轮的对账占位符不是他说的，不进摘录 / 尾巴
           // 2026-09-18：新桥的冷层（src/gate/cold-writer.js）只有四个字段，时间叫 `at`；
           // 老冷层叫 `receivedAt`。两边都认，forge 才能直接吃新桥那份 —— Alice：
           // 「那我们直接把 forge 当工具接过来不就好了」。**只差这一个字段名。**

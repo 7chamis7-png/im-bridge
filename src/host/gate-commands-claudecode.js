@@ -62,6 +62,8 @@ const COMMAND_NAMES = Object.freeze({
   usage: "usage",     // 现在这家引擎的订阅额度 / 余额
   stop: "stop",
   undo: "undo",
+  // 2026-10-22：卡住 / 拒收 / 死信 / 没送到的，列出来、按编号重来或放弃（N1/N2/N3）
+  pending: "pending",
 });
 
 /**
@@ -132,7 +134,7 @@ function describeUsage(u) {
 }
 
 function registerClaudeCodeCommands(commands, { runtime, box = null, workspaceRoot, threadId = () => "",
-  gateRoot = "", pauseIntake = null, resumeIntake = null }) {
+  gateRoot = "", pauseIntake = null, resumeIntake = null, pending = null }) {
   if (!commands || typeof commands.register !== "function") throw new Error("要桥的命令表");
   if (!runtime) throw new Error("要 claude 运行时");
   const ws = String(workspaceRoot || "");
@@ -342,6 +344,29 @@ function registerClaudeCodeCommands(commands, { runtime, box = null, workspaceRo
       if (resumeIntake) { try { resumeIntake(); } catch { /* 恢复失败下一轮心跳看得见 */ } }
     }
   }, "撤销一轮（先给影响范围）");
+
+  // ——— /pending（2026-10-22）———
+  // 以前「盒子拒收的」进死信没人捡，「不知道收没收的」堵住整条队列没命令能解，「没发出去的」只有账。
+  // 这条把它们摆一张表（src/gate/pending.js），她按编号决定：retry 重来 / drop 放弃。
+  // 只有她能用 —— 跟别的命令一样，命令层只认主人（pipeline 里 who === owner 才 match）。
+  // TG 带按钮；微信 / iMessage 没按钮，桥会把按钮转成「照着发」的文字（pipeline 的 buttonsAsText）。
+  if (pending) {
+    add(COMMAND_NAMES.pending, async ({ rest }) => {
+      const [verb = "", code = ""] = String(rest || "").trim().split(/\s+/);
+      const v = verb.toLowerCase();
+      const name = COMMAND_NAMES.pending;
+      if (!v || v === "list" || v === "ls") return pending.render();
+      if (v === "retry" || v === "重来" || v === "重投") {
+        if (!code) return { ok: false, text: `要给编号：/${name} retry <编号>（发 /${name} 看编号）` };
+        return pending.retry(code);
+      }
+      if (v === "drop" || v === "放弃") {
+        if (!code) return { ok: false, text: `要给编号：/${name} drop <编号>（发 /${name} 看编号）` };
+        return pending.drop(code);
+      }
+      return { ok: false, text: `不认识「${verb}」。用法：/${name} · /${name} retry <编号> · /${name} drop <编号>` };
+    }, "卡住 / 拒收 / 死信 / 没送到的（重来或放弃）");
+  }
 
   return registered;
 }

@@ -120,3 +120,62 @@ test('DeepSeek 换引擎：新开一本对话、尾巴当历史发出去；同�
   await assert.rejects(noKey.start(), /钥匙/);
   await noKey.close();
 });
+
+// 2026-10-22 Iris /new 也带底子（sdkOptions.forgeBase，盒子用 buildForgeBaseText 拼的那份）
+function coldFixture(fx) {
+  const coldFile = path.join(fx.dir, 'cold.jsonl');
+  const t = Date.now();
+  fs.writeFileSync(coldFile, [
+    { id: 'a', role: 'user', at: new Date(t - 60000).toISOString(), text: '冷她' },
+    { id: 'b', role: 'assistant', at: new Date(t - 59000).toISOString(), text: '冷他' },
+  ].map((r) => JSON.stringify(r)).join('\n') + '\n');
+  return coldFile;
+}
+const BASE = 'WECHAT SESSION INSTRUCTIONS\nOPS\n\n## 身份底座（IB · x）\nIB-BODY\n\n## LONG-TERM MEMORY\nMEM\n\n（以上是你的底座与场景。下面紧接着的是…）';
+
+test('codex /new 带底子：开发者指令里没有 IB（比如Nova切到 codex）→ 底子整份当第一条垫进去', async () => {
+  const fx = codexFixture({ FORGE_ENABLED: 'true' });
+  const coldFile = coldFixture(fx);
+  const rt = createCodexRuntime({ ingressPath: path.join(fx.dir, 'state', 'ingress2.json'), cwd: fx.dir,
+    threadFile: path.join(fx.dir, 'state', 'codex-thread.json'), authFile: path.join(fx.dir, 'auth.json'), codexPath: FAKE, home: fx.dir,
+    env: { ...process.env, FAKE_CODEX_LOG: path.join(fx.dir, 'rpc.jsonl'), FAKE_CODEX_KNOWN: 'real-1', FAKE_CODEX_ROLLOUT_DIR: path.join(fx.dir, 'rollouts'),
+      GATE_ROOT: '', GATE_COLD_FILE: coldFile, FORGE_ENABLED: 'true' },
+    sdkOptions: { model: 'gpt-5.6-sol', freshThread: 'tok-b', forgeBase: BASE, systemPrompt: '人格' } });
+  await rt.start();
+  const inj = fx.rpc().filter((c) => c.method === 'thread/inject_items');
+  assert.equal(inj.length, 1);
+  const texts = inj[0].params.items.map((it) => it.content.map((b) => b.text).join(''));
+  assert.equal(texts[0], BASE);
+  assert.match(texts.slice(1).join('|'), /冷她\|冷他/);
+  assert.equal(rt.status().forged.via, 'thread/inject_items');
+  await rt.close();
+});
+
+test('codex /new 带底子：开发者指令里已有同一份 IB → 底子里那段拿掉；inject 失败 → 底子跟着文字垫底走', async () => {
+  const fx = codexFixture({ FORGE_ENABLED: 'true', FAKE_CODEX_INJECT_FAIL: '1' });
+  const coldFile = coldFixture(fx);
+  const rt = createCodexRuntime({ ingressPath: path.join(fx.dir, 'state', 'ingress.json'), cwd: fx.dir,
+    threadFile: path.join(fx.dir, 'state', 'codex-thread.json'), authFile: path.join(fx.dir, 'auth.json'), codexPath: FAKE, home: fx.dir,
+    env: { ...process.env, FAKE_CODEX_LOG: path.join(fx.dir, 'rpc.jsonl'), FAKE_CODEX_KNOWN: 'real-1', FAKE_CODEX_ROLLOUT_DIR: path.join(fx.dir, 'rollouts'),
+      GATE_ROOT: '', GATE_COLD_FILE: coldFile, FORGE_ENABLED: 'true', FAKE_CODEX_INJECT_FAIL: '1' },
+    sdkOptions: { model: 'gpt-5.6-sol', freshThread: 'tok-c', forgeBase: BASE, systemPrompt: '人格\n\nIB-BODY' } });
+  await rt.start();
+  rt.enqueue({ uuid: 'u1', origin: {}, message: { type: 'user', message: { role: 'user', content: '她现在这句' } } });
+  assert.ok(await until(() => fx.rpc().some((c) => c.method === 'turn/start')));
+  const sent = JSON.stringify(fx.rpc().find((c) => c.method === 'turn/start').params);
+  assert.match(sent, /LONG-TERM MEMORY[\s\S]*以上是你的底座[\s\S]*接上次[\s\S]*冷她[\s\S]*她现在这句/);
+  assert.doesNotMatch(sent, /身份底座|IB-BODY/);
+  assert.equal(rt.status().forged.omitted[0], '身份底座');
+  await rt.close();
+});
+
+test('换引擎（rebuild）同时递了 forgeBase：只垫 rebuild 那份，不带第二份底子', async () => {
+  const fx = codexFixture({ FORGE_ENABLED: 'true' });
+  const rt = fx.make({ model: 'gpt-5.6-sol', freshThread: 'tok-d', forgeBase: 'EXTRA-BASE', rebuild: { tail: [{ role: 'user', text: 'REBUILD-BASE' }, ...TAIL], strict: true } });
+  await rt.start();
+  const inj = fx.rpc().filter((c) => c.method === 'thread/inject_items');
+  assert.equal(inj.length, 1);
+  assert.equal(inj[0].params.items.length, 5);
+  assert.doesNotMatch(JSON.stringify(inj), /EXTRA-BASE/);
+  await rt.close();
+});

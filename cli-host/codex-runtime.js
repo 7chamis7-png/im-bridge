@@ -24,6 +24,7 @@ const { coldSeed } = require('./deepseek-runtime');   // 冷层暖尾巴的读�
 const { rebuildCodexThread } = require('./rebuild-codex');
 const { forgeSwitch } = require('../src/box/forge-switch');
 const { historyMode, historyDir } = require('../src/box/history');
+const tailExclude = require('../src/box/tail-exclude');
 const { codexUsage } = require('./usage');
 
 const SCHEMA = 'nova.codex-thread.v1';
@@ -168,7 +169,9 @@ function createCodexRuntime({
   if (!cwd) throw new Error('codex 插头要 cwd（工作目录），不猜。');
 
   const homeDir = nonempty(codexHome) ? codexHome.trim() : '';
-  const authPath = nonempty(authFile) ? authFile : (homeDir ? path.join(homeDir, 'auth.json') : path.join(userHome(), '.codex', 'auth.json'));
+  // 2026-10-22 数据隔离：不再回落 ~/.codex/auth.json，必须给 codexHome 或 authFile。
+  if (!nonempty(authFile) && !homeDir) throw new Error('codex 插头要 codexHome（这个人格自己的 CODEX_HOME），不回落 ~/.codex。');
+  const authPath = nonempty(authFile) ? authFile : path.join(homeDir, 'auth.json');
   assertSubscription(authPath);   // 起之前就把钱的闸验了
 
   const ingress = createIngress({ filePath: ingressPath });
@@ -236,6 +239,22 @@ function createCodexRuntime({
   const coldPath = env.GATE_COLD_FILE || (env.GATE_ROOT ? path.join(env.GATE_ROOT, 'cold.jsonl') : '');
   let freshThread = true;   // start() 里续上旧 thread 会置 false
   let seeded = false;       // 冷层只垫一次（第一轮）
+
+  // 底子（2026-10-22，Iris /new 也带，跟Nova同一份）：盒子用 src/box/instructions.js buildForgeBaseText 拼好、
+  // 从 sdkOptions.forgeBase 递过来（盒子才有记忆 / 日记 / 笔记本的路径，cli 宿主不碰）。开新 thread 时当第一条
+  // （她那一侧的）消息垫在暖尾巴前面 —— 跟 claude forge 合成的新舱同一个形状。续上旧 thread 就用不上。
+  // 开发者指令里已经接了同一份 IB 身份底座（engines.js joinInstructions）→ 底子里那段拿掉，免得他看见两份。
+  const devInstructions = nonempty(sdkOptions.systemPrompt) ? sdkOptions.systemPrompt.trim() : '';   // 跟上面递给驱动的同一份
+  const forgeBase = (() => {
+    const raw = nonempty(sdkOptions.forgeBase) ? sdkOptions.forgeBase.trim() : '';
+    if (!raw) return { text: '', omitted: [] };
+    const { forgeBaseSectionBody, omitForgeBaseSection } = require('../src/box/instructions');
+    const ib = forgeBaseSectionBody(raw, '身份底座');
+    if (ib && devInstructions.includes(ib)) return { text: omitForgeBaseSection(raw, '身份底座'), omitted: ['身份底座'] };
+    return { text: raw, omitted: [] };
+  })();
+  /** 这次起来底子垫没垫、怎么垫的（盒子点名用）。 */
+  let forged = null;
 
   let running = false;
   let stopping = false;
@@ -319,14 +338,20 @@ function createCodexRuntime({
       let toSend = turnInput;
       if (freshThread && !seeded) {
         seeded = true;
-        const seedRows = coldPath ? coldSeed(coldPath) : [];
+        // forge 没垫上时的文字垫底：她勾掉的轮这里也不带（同一份排除名单）
+        const skip = tailExclude.makeExcluder(tailExclude.tailExcludeFile(env.GATE_ROOT));
+        const seedRows = coldPath ? coldSeed(coldPath, skip ? { skip } : {}) : [];
         if (seedRows.length) {
           const tail = seedRows.map((r) => `${r.role === 'user' ? '她' : '我'}：${r.content}`).join('\n');
+          // forge 没垫上（inject 失败）时底子也跟着文字垫底走，别让他光有尾巴没底子
+          const base = forgeBase.text ? `${forgeBase.text}\n\n` : '';
           toSend = [
-            { type: 'text', text: `【接上次（冷层里最近的原话，接得上就接，这不是她这一轮刚说的）】\n${tail}\n\n【她现在说】` },
+            { type: 'text', text: `${base}【接上次（冷层里最近的原话，接得上就接，这不是她这一轮刚说的）】\n${tail}\n\n【她现在说】` },
             ...turnInput,
           ];
-          console.log(`[engine/codex] 冷层垫了 ${seedRows.length} 轮暖尾巴`);
+          if (base) forged = { base: true, baseChars: forgeBase.text.length, omitted: forgeBase.omitted, via: '文字垫底（第一轮）' };
+          console.log(`[engine/codex] 冷层垫了 ${seedRows.length} 轮暖尾巴${base ? `，底子 ${forgeBase.text.length} 字在前` : ''}`);
+          if (skip) tailExclude.consumeTailExclude(tailExclude.tailExcludeFile(env.GATE_ROOT), { usedBy: 'cold-seed/codex', threadId: driver.threadId || '' });
         }
       }
       // 这一轮的工具 / reasoning / 边写边念，按到达顺序排队送（回调是同步的，送是异步的）
@@ -408,11 +433,19 @@ function createCodexRuntime({
       const hdir = historyMode(env) === 'on' ? historyDir(env.GATE_ROOT, env) : '';
       // withBody / oldOutboxDb 关掉：那两样是Nova一个人的（~/.nova 底下），别垫进别人的舱
       const picked = selectTail({ conversationSourceFile: coldPath, workspaceRoot: cwd, historyDir: hdir,
-        withBody: false, oldOutboxDb: false, log: (m) => console.log(m) });
-      const r = await rebuildCodexThread({ driver, tail: picked.tail, log: (m) => console.error(m) });
+        withBody: false, oldOutboxDb: false, log: (m) => console.log(m),
+        exclude: tailExclude.readTailExclude(tailExclude.tailExcludeFile(env.GATE_ROOT)).entries });
+      // 跟 claude forgeOpening 同一个规矩：没有尾巴就不垫（底子也不单独垫），照旧走下面的冷层文字垫底
+      const withBase = Boolean(forgeBase.text) && picked.tail.length > 0;
+      const tail = withBase ? [{ role: 'user', text: forgeBase.text }, ...picked.tail] : picked.tail;
+      const r = await rebuildCodexThread({ driver, tail, log: (m) => console.error(m) });
       if (r.ok) {
         seeded = true;
-        console.log(`[engine/codex] forge（${sw.from}）垫了 ${r.injected} 条真实轮，料源=${picked.source}`
+        if (withBase) forged = { base: true, baseChars: forgeBase.text.length, omitted: forgeBase.omitted, via: 'thread/inject_items' };
+        // 排除名单（她在面板上勾掉的轮）这次已经生效 → 用掉、清空、记一笔（src/box/tail-exclude.js）
+        const c = tailExclude.consumeTailExclude(tailExclude.tailExcludeFile(env.GATE_ROOT), { usedBy: 'forge/codex', threadId: driver.threadId || '' });
+        if (c.used) console.log(`[engine/codex] 用掉了排除名单（${c.used} 条），已清空`);
+        console.log(`[engine/codex] forge（${sw.from}）垫了 ${r.injected} 条${withBase ? `（第 1 条是底子 ${forgeBase.text.length} 字）` : '真实轮'}，料源=${picked.source}`
           + `${r.verified ? '，rollout 回读一致' : ''}`);
       } else console.log(`[engine/codex] forge 没垫上（${r.reason}），照旧冷层文字垫底`);
     } catch (e) {
@@ -524,7 +557,7 @@ function createCodexRuntime({
     list: (state) => ingress.list(state),
     status: () => ({ running, stopping, initialized, requestedModel: model, actualModel, sessionId: threadId,
       compactions: typeof driver.compactions === 'function' ? driver.compactions() : 0,
-      ...(lastRebuild ? { rebuilt: lastRebuild } : {}) }),
+      ...(lastRebuild ? { rebuilt: lastRebuild } : {}), ...(forged ? { forged } : {}) }),
     /** /usage：问活着的 app-server 现在的额度。 */
     usage: () => codexUsage({ driver }),
     /**

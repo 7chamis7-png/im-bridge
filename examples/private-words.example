@@ -1,0 +1,9 @@
+# 私货词表样例（test/gate/panel-private-scan.js 用）。真的那份放在仓库外，用 PRIVATE_WORDS_FILE 指过去。
+# 每行一个词，大小写不敏感、按子串匹配；空行和 # 开头的行忽略。
+# allow:<原文> 是豁免：扫之前先把这段原文抠掉（比如桥本来就有的 env 名里恰好含某个词）。
+example-character-name
+example-owner-name
+/home/example-user
+example.com
+123456789
+allow:EXAMPLE_ENV_NAME

@@ -312,11 +312,15 @@ function loadSessionHandoff(config = {}) {
  */
 function loadPendingPromises(config = {}) {
   let notebook = "";
-  const moduleId = config.notebookModule || process.env.NOVA_NOTEBOOK_MODULE || require("../core/paths").homePath("nova-notebook", "store");
+  // 2026-10-22 数据隔离：笔记本模块和文件都必须显式给，缺一个这段就空着。
+  // 以前缺了就回落 ~/nova-notebook/store + 它自己的默认文件（= Nova的笔记本），
+  // 同机新建的角色换舱时就把别人的「她最近 / 她想要」读进了自己的底子（10-22 测试角色实测）。
+  const moduleId = config.notebookModule || process.env.NOVA_NOTEBOOK_MODULE || "";
+  const file = config.notebookFile || process.env.NOVA_NOTEBOOK_FILE || "";
+  if (!moduleId || !file) return "";
   try {
     const store = require(moduleId);
-    // 有 notebookFile 就用它（测试传隔离目录）；没有就让 store 用自己的默认
-    notebook = config.notebookFile ? store.render({ file: config.notebookFile }) : store.render();
+    notebook = store.render({ file });
   } catch { /* 装不上就当没有 —— 空着，不炸 */ }
   return notebook || "";
 }
@@ -331,11 +335,30 @@ function loadPlainContextFile(filePath) {
   }
 }
 
-function loadRecentDiary(config = {}, days = RECENT_DIARY_DAYS) {
+// 2026-10-22：日记文件两种摆法都认 —— 平铺 diary/YYYY-MM-DD.md（Nova）和按年分目录 diary/YYYY/YYYY-MM-DD.md（Iris）。
+// 同一天两处都有：**以平铺为准，不合并**（合并会让同一天出现两段、顺序也说不清；平铺是这个函数原来唯一认的，
+// Nova的输出因此逐字节不变）。平铺那份读不到才看年份目录。只在 config.diaryDir 底下找，不碰别处。
+function readDiaryDay(diaryDir, dateStr) {
+  for (const p of [path.join(diaryDir, `${dateStr}.md`), path.join(diaryDir, dateStr.slice(0, 4), `${dateStr}.md`)]) {
+    let content;
+    try { content = fs.readFileSync(p, "utf8"); } catch { continue; }   // 这处没有 → 看下一处
+    return content.trim();   // 读到了就用这处（哪怕是空的：平铺有文件 = 以平铺为准）
+  }
+  return "";
+}
+
+/** readDiaryDay 用的是哪一个文件（同一个先后：平铺 → 年份目录；读得到才算）。面板列来源用，规则只写这一处的兄弟。 */
+function diaryDayPath(diaryDir, dateStr) {
+  for (const p of [path.join(diaryDir, `${dateStr}.md`), path.join(diaryDir, dateStr.slice(0, 4), `${dateStr}.md`)]) {
+    try { fs.readFileSync(p); return p; } catch { /* 下一处 */ }
+  }
+  return "";
+}
+
+function loadRecentDiary(config = {}, days = RECENT_DIARY_DAYS, now = new Date()) {
   const diaryDir = typeof config.diaryDir === "string" ? config.diaryDir.trim() : "";
   if (!diaryDir) return "";
   try {
-    const now = new Date();
     const entries = [];
     for (let i = 0; i < days; i++) {
       const d = new Date(now);
@@ -349,15 +372,8 @@ function loadRecentDiary(config = {}, days = RECENT_DIARY_DAYS) {
         month: "2-digit",
         day: "2-digit",
       }).format(d);
-      const filePath = path.join(diaryDir, `${dateStr}.md`);
-      try {
-        const content = fs.readFileSync(filePath, "utf8").trim();
-        if (content) {
-          entries.push(`### ${dateStr}\n\n${content}`);
-        }
-      } catch {
-        // no entry for this day
-      }
+      const content = readDiaryDay(diaryDir, dateStr);
+      if (content) entries.push(`### ${dateStr}\n\n${content}`);
     }
     return entries.join("\n\n---\n\n");
   } catch {
@@ -527,6 +543,51 @@ function describeForgeBase(config) {
 }
 
 /**
+ * 从拼好的底子里拿掉某一段（2026-10-22，Iris /new 也带底子）。
+ * 只认 FORGE_BASE_HEADERS 那几个顶层段：从 `## <name>…` 那行起，到下一个顶层段标题、或底子收尾那句
+ *（「（以上是你的底座…」）为止。其余一字不动。
+ * 用处只有一个：codex 的开发者指令里已经接了同一份 IB 身份底座（cli-host/engines.js joinInstructions），
+ * 底子再带一遍他就看见两份 —— 由 codex 插头比对内容后决定拿不拿掉，不另拼一份近似的底子。
+ */
+function omitForgeBaseSection(text, name) {
+  const lines = String(text || "").split("\n");
+  const out = [];
+  let skipping = false;
+  for (const line of lines) {
+    const m = /^## (.+)$/.exec(line);
+    const top = m && FORGE_BASE_HEADERS.find((h) => m[1].startsWith(h));
+    const ends = top || line.startsWith("（以上是你的底座");
+    if (ends) {
+      const was = skipping;
+      skipping = Boolean(top) && top === name;
+      // 拼的时候每段前面都是 "", "## …" 成对推进去的：段前那行空行跟着段走，被拿掉的段吃掉的那行补给下一段
+      if (skipping && !was && out.length && out[out.length - 1] === "") out.pop();
+      if (!skipping && was) out.push("");
+    }
+    if (!skipping) out.push(line);
+  }
+  return out.join("\n").trim();
+}
+
+/**
+ * 某一段的正文（不含标题）。没有这段 = ""。跟 describeForgeBase 同一个切法。
+ */
+function forgeBaseSectionBody(text, name) {
+  let cur = "执行规则";
+  const buf = [];
+  for (const line of String(text || "").split("\n")) {
+    const m = /^## (.+)$/.exec(line);
+    const top = m && FORGE_BASE_HEADERS.find((h) => m[1].startsWith(h));
+    if (top) { cur = top; continue; }
+    if (cur === name) {
+      if (line.startsWith("（以上是你的底座")) break;
+      buf.push(line);
+    }
+  }
+  return buf.join("\n").trim();
+}
+
+/**
  * 这一舱**真装进去的那份** IB 注入是哪个版本（2026-09-21，IB 发布闭环要的「会话注入 manifest」）。
  * 只报文件本身的指纹，不解析内容 —— 发布那头拿 injection_sha256 对账，对得上才算「他真的带着这版醒来」。
  * 读不到 = null（不拼 IB 段的舱本来就没有）。
@@ -544,12 +605,17 @@ function describeInjection(config = {}) {
 }
 
 module.exports = {
+  FORGE_BASE_HEADERS,
   describeForgeBase,
+  omitForgeBaseSection,
+  forgeBaseSectionBody,
+  diaryDayPath,
   buildOpeningTurnText,
   buildForgeBaseText,
   buildInstructionRefreshText,
   buildSilentRefreshText,
   loadRecentColdExcerpts,
+  loadRecentDiary,
   loadSessionHandoff,
   loadWechatInstructions,
   loadInstructionFile,

@@ -9,9 +9,12 @@ const path = require('node:path');
 const { randomUUID } = require('node:crypto');
 const { createRemoteRuntime } = require('./client');
 
-const { homePath, gateRoot } = require('../src/core/paths');
+const { gateRoot } = require('../src/core/paths');
 
-const root = process.env.DEEPSEEK_ROOT || homePath('.nova-deepseek');
+// 2026-10-22 数据隔离：这几样必须显式给，不再回落 ~/.nova-deepseek / ~/nova（= Nova的目录）
+const need = (k, ...alts) => { for (const n of [k, ...alts]) { const v = String(process.env[n] || '').trim(); if (v) return v; }
+  console.error(`[deepseek] 没设 ${[k, ...alts].join(' / ')} —— 不回落到别人的目录`); process.exit(2); };
+const root = need('DEEPSEEK_ROOT');
 const socketPath = process.env.DEEPSEEK_SOCKET || path.join(root, 'deepseek.sock');
 const text = process.argv.slice(2).join(' ').trim();
 if (!text) {
@@ -50,7 +53,7 @@ timer.unref?.();
 
 (async () => {
   await client.ensure({
-    workspaceRoot: process.env.DEEPSEEK_CWD || process.env.GATE_WORKSPACE_ROOT || homePath('nova'),
+    workspaceRoot: need('DEEPSEEK_CWD', 'GATE_WORKSPACE_ROOT'),
     model: 'deepseek',
     ingressPath: path.join(root, 'state', 'ingress.json'),
   });

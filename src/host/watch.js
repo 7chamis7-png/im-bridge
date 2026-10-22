@@ -69,7 +69,8 @@ function inspect({ now, hb, prev = null, prevAt = 0,
   staleMs = DEFAULT_STALE_MS, noReplyMs = DEFAULT_NO_REPLY_MS,
   legacyPending = null, legacyPendingSince = 0 } = {}) {
   const issues = [];
-  const add = (code, text, bad = false) => issues.push({ code, text, bad });
+  // n：这个毛病涉及几条（2026-10-22 加，推给她手机时说人话要用：「有 1 条消息卡住了」）
+  const add = (code, text, bad = false, n = null) => issues.push({ code, text, bad, ...(n == null ? {} : { n }) });
 
   // ——— 心跳本身 ———
   if (!hb) {
@@ -115,7 +116,7 @@ function inspect({ now, hb, prev = null, prevAt = 0,
     const detail = rows.length ? rows.map(who).join("；") : "";
     add("turn_acceptance_unknown",
       "有 " + unknownTurns + " 条轮次的接收结果不明" + ledger + detail
-      + " —— 先核对证据，再继续让盒子收新话", true);
+      + " —— 先核对证据，再继续让盒子收新话", true, unknownTurns);
   }
   if (progressPresent) {
     const pending = Math.max(0, Number(progress.pending));
@@ -125,7 +126,7 @@ function inspect({ now, hb, prev = null, prevAt = 0,
       const oldestRow = progress.oldestPending ? "，最老那条" + who(progress.oldestPending) : "";
       add("in_no_out",
         "仍有 " + pending + " 条任务等了 " + Math.round((now - oldest) / 60000)
-        + " 分钟没有完成" + phase + oldestRow + " —— 盒子可能挂死了（她那头是石沉大海）", true);
+        + " 分钟没有完成" + phase + oldestRow + " —— 盒子可能挂死了（她那头是石沉大海）", true, pending);
     }
   }
 
@@ -156,15 +157,15 @@ function inspect({ now, hb, prev = null, prevAt = 0,
 
   // ——— 她收不到话的几种 ———
   if (d("held") > 0) {
-    add("held_growing", "又有 " + d("held") + " 句话没有落点、暂存着 —— 她收不到");
+    add("held_growing", "又有 " + d("held") + " 句话没有落点、暂存着 —— 她收不到", false, d("held"));
   }
   const unknown = d("undelivered.等人核对");
   if (unknown > 0) {
     add("unknown_growing",
-      "又有 " + unknown + " 条「不知道发没发」——**别自动重发**，等人核对", true);
+      "又有 " + unknown + " 条「不知道发没发」——**别自动重发**，等人核对", true, unknown);
   }
   if (d("stats.failed") > 0) {
-    add("failed_growing", "又有 " + d("stats.failed") + " 条发失败了");
+    add("failed_growing", "又有 " + d("stats.failed") + " 条发失败了", false, d("stats.failed"));
   }
 
   // ——— 水位 ———
@@ -295,7 +296,8 @@ function makeWatch({ onHighWater = null, highWaterRatio = 0.85,
       if (fresh.length) {
         for (const i of fresh) toldAt.set(i.code, t);
         const head = r.level === "bad" ? "【桥出事了】" : "【桥有点不对】";
-        notify(head + "\n" + fresh.map((i) => "· " + i.text).join("\n"));
+        // 第二个参数（2026-10-22）：结构化的这几条，宿主要按类节流、说人话推给她（watch-notify.js）
+        notify(head + "\n" + fresh.map((i) => "· " + i.text).join("\n"), { level: r.level, issues: fresh });
         log("[守护] " + r.level + " " + fresh.map((i) => i.code).join(","));
       }
       // ——— 水位线收尾（2026-09-21 Alice定）———

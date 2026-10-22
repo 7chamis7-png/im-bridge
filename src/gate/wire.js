@@ -55,7 +55,9 @@ function buildGate({ root, coldFile, plugins = {}, capabilities = {}, identities
   nativeImageInput = true, box, preferredRoute = null, groups = null, owner = "alice",
   producersDir = "", segment = {}, sendGapMs = 700, sendGapByChannel = {}, enforceEnabled = false, log = () => {},
   // 关舱前那一轮的正文（宿主给；桥不认识里面写的是什么）。不给 = 没有这一步。
-  closingNote = null }) {
+  closingNote = null,
+  // 2026-10-22：盒子明确拒收后自动重投的次数 / 退避（turn-queue.js 的 RETRY_DEFAULTS），不给用默认
+  turnRetry = {} }) {
   // 盒子**必须显式给**：给一个对象 = 五条口当场点名；给 null = 这座桥不往盒子里送
   // （影子那种只读观察）。**不给 = 忘了传**，当场报——9-17 就是靠「可选参数默认空」
   // 把「插头一个都没接」这件事瞒过了装配、瞒过了测试，直到开关一开才发作。
@@ -156,7 +158,7 @@ function buildGate({ root, coldFile, plugins = {}, capabilities = {}, identities
   const pipe = box === null ? null : makePipeline({
     plugins: pluginMap, inbound, outbound, box, router, media, undelivered,
     groups: groupGate, owner, binding, enabled: () => !enforceEnabled || killswitch.enabled(), log,
-    closingNote,
+    closingNote, retry: turnRetry,
   });
 
   // 生产者投递口：一条一个文件，谁都能往里投（独立进程也行）。

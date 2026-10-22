@@ -35,8 +35,9 @@ const { DatabaseSync } = require("node:sqlite");
 
 // 影子是**用桥的人**，路径归它给（桥自己不许写死，见 docs/SPEC.md 铁律 1）。
 const { homePath, gateRoot, personaStateDir } = require("../core/paths");
-const KEYS = process.env.GATE_SHADOW_KEYS || homePath("wxkey", "all_keys.json");
-const IMAGE_KEY = process.env.GATE_SHADOW_IMAGE_KEY || homePath("wxkey", "image_key.txt");
+// 2026-10-22 数据隔离：微信钥匙必须显式给，不回落 ~/wxkey（= Nova那台微信的钥匙）
+const KEYS = process.env.GATE_SHADOW_KEYS || "";
+const IMAGE_KEY = process.env.GATE_SHADOW_IMAGE_KEY || "";
 const REL = "message/message_0.db";
 const ROOT = path.join(gateRoot(), "shadow");
 const CURSOR = path.join(ROOT, "cursor.json");

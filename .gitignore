@@ -9,3 +9,4 @@ fixtures/
 AGENTS.md
 .env
 *.secret
+panel-screenshots/

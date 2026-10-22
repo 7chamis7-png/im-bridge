@@ -17,9 +17,12 @@ const { createCliHost } = require('./server');
 const { createEngineFactories, readSecret } = require('./engines');
 const { readPersonaSpec, personaConfigPath } = require('../src/host/persona-file');
 
-const { homePath, gateRoot } = require('../src/core/paths');
+const { gateRoot } = require('../src/core/paths');
 
-const root = process.env.DEEPSEEK_ROOT || homePath('.nova-deepseek');
+// 2026-10-22 数据隔离：这几样必须显式给，不再回落 ~/.nova-deepseek / ~/nova（= Nova的目录）
+const need = (k, ...alts) => { for (const n of [k, ...alts]) { const v = String(process.env[n] || '').trim(); if (v) return v; }
+  console.error(`[deepseek] 没设 ${[k, ...alts].join(' / ')} —— 不回落到别人的目录`); process.exit(2); };
+const root = need('DEEPSEEK_ROOT');
 const stateDir = path.join(root, 'state');
 fs.mkdirSync(stateDir, { recursive: true, mode: 0o700 });
 try { fs.chmodSync(root, 0o700); } catch { /* 已经在也没关系 */ }
@@ -31,12 +34,12 @@ catch (error) {
   process.exit(1);
 }
 
-const promptPath = process.env.DEEPSEEK_SYSTEM_PROMPT || process.env.GATE_SYSTEM_PROMPT_FILE || homePath('nova', 'nova-system-prompt.md');
+const promptPath = need('DEEPSEEK_SYSTEM_PROMPT', 'GATE_SYSTEM_PROMPT_FILE');
 let systemPrompt = '';
 try { systemPrompt = fs.readFileSync(promptPath, 'utf8'); }
 catch (error) { console.error('[nova-deepseek] 系统提示读不到：', error.message); }
 
-const workspace = process.env.DEEPSEEK_CWD || process.env.GATE_WORKSPACE_ROOT || homePath('nova');
+const workspace = need('DEEPSEEK_CWD', 'GATE_WORKSPACE_ROOT');
 const productionIngress = path.join(gateRoot(), 'state', 'im-bridge-ingress.json');
 
 const factories = createEngineFactories({ env: process.env, stateDir, workspace, requireCodexHome: true });

@@ -67,7 +67,8 @@ function buildHeart({ env = process.env, dirOverride = "" } = {}) {
       // 这类待办笔记本要不要接、算哪个 kind 还没定——HEADER 目前也不渲染这一行了，
       // 见 producers/checkin.js 和 heart/beats/checkin.js 文件头）；
       // 模块路径跟 instructions.js 同一个开关
-      notebookModule: env.NOVA_NOTEBOOK_MODULE || path.join(homeDir(env), "nova-notebook", "store"),
+      // 2026-10-22 数据隔离：没配就不读（以前回落 ~/nova-notebook/store + 它的默认文件 = Nova的笔记本）
+      notebookModule: env.NOVA_NOTEBOOK_MODULE || "",
       notebookFile: env.NOVA_NOTEBOOK_FILE || "",
       desireUrl: env.DESIRE_URL || "http://127.0.0.1:8766",
       log,
@@ -89,7 +90,8 @@ function buildHeart({ env = process.env, dirOverride = "" } = {}) {
       coldFile: env.GATE_COLD_FILE || path.join(root, "cold.jsonl"),
       jarFile: env.NOVA_JAR_FILE || path.join(oldState, "幸福罐子.md"),
       // 他的会话记录目录 = Claude Code 按工作目录起的名（/root/nova → ~/.claude/projects/-root-nova）
-      transcriptDir: env.NOVA_TRANSCRIPT_DIR || claudeProjectDir(env.GATE_WORKSPACE_ROOT || path.join(homeDir(env), "nova"), env),
+      // 2026-10-22 数据隔离：没配工作目录就不捞（以前回落 ~/nova = Nova的会话记录）
+      transcriptDir: env.NOVA_TRANSCRIPT_DIR || (env.GATE_WORKSPACE_ROOT ? claudeProjectDir(env.GATE_WORKSPACE_ROOT, env) : ""),
       claudeBin: env.DREAM_CLAUDE_BIN || "/usr/local/bin/claude",  // 2026-10-14 搬德国机后 claude 从 /usr/bin 挪到 /usr/local/bin，织梦 spawn ENOENT 炖不出梦；改成实际路径
       log,
     }),

@@ -125,6 +125,15 @@ class GateStore {
    * 登记一条接收事件。**此时不分配 user_seq。**
    * 同一 nativeId 重复登记返回原事件（重传沿用原号，不吃两个号）。
    */
+  /**
+   * 这条平台消息以前登记过没有（2026-10-22，/pending 重投死信前去重用）。
+   * 只查不写；没有 nativeId 的认不出来，返回 null。
+   */
+  findNative(delivery) {
+    if (!delivery || !delivery.nativeId) return null;
+    return this.nativeIndex.get(GateStore.nativeKey(delivery)) || null;
+  }
+
   registerInbound(delivery, verdict) {
     const key = GateStore.nativeKey(delivery);
     if (delivery.nativeId && this.nativeIndex.has(key)) {

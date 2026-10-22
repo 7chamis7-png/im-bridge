@@ -50,13 +50,15 @@ class TurnStore {
   }
 
   /**
-   * 同 outbox：只丢**已有结论**的（completed/failed/rejected），从最老的丢起。
+   * 同 outbox：只丢**已有结论**的（completed/failed），从最老的丢起。
+   * 2026-10-22：rejected 不再算「有结论」—— 它现在是「等自动重投 / 等她在 /pending 里决定」，
+   * 丢了就是悄悄吞掉她一句话。
    * 任何 queued/submitting/accepted/unknown 一条都不丢 —— unknown 正是等人核对的。
    * 代价同样是「很久以前的 trace_id 不再去重」，保留 300 条远大于真实重投窗口。
    */
   #pruneSettled() {
     const settled = this.list()
-      .filter((r) => ["completed", "failed", "rejected"].includes(r.state))
+      .filter((r) => ["completed", "failed"].includes(r.state))
       .sort((a, b) => String(a.updatedAt || a.queuedAt || "").localeCompare(String(b.updatedAt || b.queuedAt || "")));
     const excess = settled.length - this.keepSettled;
     if (excess <= 0) return [];

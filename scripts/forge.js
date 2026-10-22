@@ -13,6 +13,8 @@ const { getPendingHandoff, getPendingTailRecords } = require("../src/services/se
 const { OUTWARD_TZ, OUTWARD_LOCALE } = require("../src/core/outward-tz");
 
 const { homePath, personaStateDir } = require("../src/core/paths");
+const { isNotHisWords } = require("../src/core/not-his-words");
+const tailExclude = require("../src/box/tail-exclude");
 const { ownerDisplayName, agentDisplayName, agentAlertName } = require("../src/core/names");
 
 const STATE_FILE = process.env.FORGE_STATE_FILE
@@ -38,7 +40,7 @@ function latestJsonlIn(dir) {
   } catch { return null; }
 }
 // 往Nova窗口推一条系统消息（与 context-monitor.notifyViaWeChat 同一条 queue 路径）。
-const STATE_DIR = process.env.NOVA_STATE_DIR || path.join(os.homedir(), ".nova");
+const STATE_DIR = personaStateDir();   // 2026-10-22 数据隔离：不再回落 ~/.nova
 const SESSIONS_FILE = path.join(STATE_DIR, "sessions.json");
 const QUEUE_FILE = path.join(STATE_DIR, "system-message-queue.json");
 function notify(text) {
@@ -179,7 +181,7 @@ function outwardStamp(d) {
 // 老账本一条都对不上（命中 0），新账本里有 2 条 not_sent、1 条 blocked —— 这道过滤从切桥起就没起作用。
 // 现在先读新账本（loadUndeliveredFromOutboxJson），读不到才回落到这里。
 function oldOutboxDbPath() {
-  return process.env.NOVA_OUTBOX_DB || path.join(os.homedir(), ".nova", "outbox.db");
+  return process.env.NOVA_OUTBOX_DB || path.join(personaStateDir(), "outbox.db");   // 2026-10-22：跟着本人格的数据目录
 }
 
 function loadUndeliveredTexts() {
@@ -325,8 +327,11 @@ function isClosingRecord(r, closing) {
   return false;
 }
 
+// exclude（2026-10-22 Alice）：她在面板上勾掉的那几轮这次不带进新舱。
+//   不给 = 读 $GATE_ROOT/tail-exclude.json；false = 不排（面板列「全部候选」时用）；数组 = 用这份名单。
+//   冷层文件本身不碰。见 src/box/tail-exclude.js。
 function buildTailFromCold({ conversationSourceFile, workspaceRoot, handoffStateFile = "", withBody = true, oldOutboxDb = true,
-  maxTokens = 0, info = null }) {
+  maxTokens = 0, info = null, exclude = undefined }) {
   if (!conversationSourceFile) return [];
   try {
     const svc = new ConversationRecoveryService({ conversationSourceFile });
@@ -414,8 +419,18 @@ function buildTailFromCold({ conversationSourceFile, workspaceRoot, handoffState
     {
       const closing = loadClosingTurns();
       const before = records.length;
-      records = records.filter((r) => !isClosingRecord(r, closing));
-      if (records.length < before) console.warn(`[forge] 剔除换舱收尾 / 桥回执 ${before - records.length} 条`);
+      // 2026-10-22：沉默轮的「[本轮未回复]」占位符也在这儿剔（handoff 路径不经过 recovery service 的过滤）
+      records = records.filter((r) => !isClosingRecord(r, closing) && !isNotHisWords(r));
+      if (records.length < before) console.warn(`[forge] 剔除换舱收尾 / 桥回执 / 沉默占位 ${before - records.length} 条`);
+    }
+    {
+      const excluder = exclude === false ? null : tailExclude.makeExcluder(Array.isArray(exclude) ? exclude : tailExclude.tailExcludeFile());
+      if (excluder) {
+        const before = records.length;
+        records = records.filter((r) => !excluder(r));
+        if (records.length < before) console.warn(`[forge] 按她的排除名单（tail-exclude.json）这次不带 ${before - records.length} 条`);
+        if (info && typeof info === "object") info.excluded = before - records.length;
+      }
     }
     const bodyHistory = withBody ? loadBodyHistory() : [];
     const mapped = records
@@ -429,7 +444,8 @@ function buildTailFromCold({ conversationSourceFile, workspaceRoot, handoffState
           const body = nearestBody(bodyHistory, d.getTime());
           text = body ? `【${agentDisplayName()}自身状态；不是${ownerDisplayName()}】\n${body}\n\n${timed}` : timed;
         }
-        return { role: r.role, text, timestamp: valid ? d.toISOString() : null };
+        // sourceId / rawText：面板列尾巴、勾排除要认的（合成 transcript / codex 注入只用 role + text，多带的不进新舱）
+        return { role: r.role, text, timestamp: valid ? d.toISOString() : null, sourceId: String(r.id || ""), rawText: String(r.text || "") };
       });
     return capTail(mapped, maxTokens, info);
   } catch { return []; }
@@ -673,12 +689,12 @@ function forgeSource({ historyDir = "" } = {}) {
 }
 
 /** 全本 → 跟冷层同口径的记录 → 跟冷层**同一条**尾巴管线（同一个窗口规则、同一个已投递过滤、同一个时间前缀和上限）。 */
-function buildTailFromHistory({ historyDir, workspaceRoot, withBody = true, oldOutboxDb = true, maxTokens = 0, info = null }) {
+function buildTailFromHistory({ historyDir, workspaceRoot, withBody = true, oldOutboxDb = true, maxTokens = 0, info = null, exclude = undefined }) {
   const { records } = projectDialogue({ dir: historyDir });
   const tmp = path.join(os.tmpdir(), `forge-history-${process.pid}-${Date.now()}.jsonl`);
   try {
     fs.writeFileSync(tmp, records.map((r) => JSON.stringify(r)).join("\n") + (records.length ? "\n" : ""), { mode: 0o600 });
-    return buildTailFromCold({ conversationSourceFile: tmp, workspaceRoot, handoffStateFile: "", withBody, oldOutboxDb, maxTokens, info });
+    return buildTailFromCold({ conversationSourceFile: tmp, workspaceRoot, handoffStateFile: "", withBody, oldOutboxDb, maxTokens, info, exclude });
   } finally { try { fs.unlinkSync(tmp); } catch {} }
 }
 
@@ -701,14 +717,14 @@ function compareTails(a, b) {
 
 /** 换舱要的那条尾巴从哪来。返回 { tail, source, reconcile }。 */
 function selectTail({ conversationSourceFile, workspaceRoot, handoffStateFile = "", historyDir = "", log = console.warn,
-  withBody = true, oldOutboxDb = true, maxTokens = 0 }) {
+  withBody = true, oldOutboxDb = true, maxTokens = 0, exclude = undefined }) {
   const coldCap = {};
-  const coldTail = buildTailFromCold({ conversationSourceFile, workspaceRoot, handoffStateFile, withBody, oldOutboxDb, maxTokens, info: coldCap });
+  const coldTail = buildTailFromCold({ conversationSourceFile, workspaceRoot, handoffStateFile, withBody, oldOutboxDb, maxTokens, info: coldCap, exclude });
   const want = forgeSource({ historyDir });
   if (want !== "history") return { tail: coldTail, source: "cold", reconcile: null, cap: coldCap };
   let histTail;
   const histCap = {};
-  try { histTail = buildTailFromHistory({ historyDir, workspaceRoot, withBody, oldOutboxDb, maxTokens, info: histCap }); }
+  try { histTail = buildTailFromHistory({ historyDir, workspaceRoot, withBody, oldOutboxDb, maxTokens, info: histCap, exclude }); }
   catch (e) {
     log(`[forge] 全本读不了（${e.message}），这次用冷层`);
     return { tail: coldTail, source: "cold", reconcile: { ok: false, reason: `全本读不了：${e.message}` }, cap: coldCap };
@@ -789,7 +805,7 @@ function forgeOpening({ baseText, conversationSourceFile, handoffStateFile = "",
 // 之后认不认"，那是 `forge.js validate` 那个金丝雀的活，由 forge-revalidate.sh
 // 在 CC 版本漂移时跑。两层各管一段，别混。
 const PREPARED_FILE = process.env.FORGE_PREPARED_FILE
-  || path.join(os.homedir(), ".nova", "forge-prepared.json");
+  || path.join(personaStateDir(), "forge-prepared.json");   // 2026-10-22：每个人格一份，不再共用 ~/.nova
 const PREPARED_MAX_AGE_MS = Number(process.env.FORGE_PREPARED_MAX_AGE_MS) || 6 * 60 * 60 * 1000;
 
 function readPrepared() {

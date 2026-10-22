@@ -141,7 +141,7 @@ async function runChecks(env, { offline = false, envFile = "" } = {}) {
       if (g.ok) ok(`${g.reason}（${cmd}）`);
       else warn(`codex 版本闸：${g.reason}（换舱垫历史会被拒）`, "装白名单里的版本，或验过之后加进 CODEX_VERSION_ALLOW");
     }
-    const authFile = str("CODEX_AUTH_FILE") || path.join(str("CODEX_HOME") || path.join(home, ".codex"), "auth.json");
+    const authFile = str("CODEX_AUTH_FILE") || (str("CODEX_HOME") ? path.join(str("CODEX_HOME"), "auth.json") : "");   // 10-22：没 CODEX_HOME 就是没配，不看 ~/.codex
     try {
       require(path.join(REPO_ROOT, "cli-host/codex-runtime")).assertSubscription(authFile);
       ok(`codex 登录态是 ChatGPT 订阅（${authFile}）`);

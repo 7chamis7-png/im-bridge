@@ -28,26 +28,13 @@ function readColdTail(file, n) {
 }
 
 /**
- * @param {object} o
- * @param {object} o.cfg      `main.js` 的 readConfig 产物
- * @param {object} o.backend  BOXES[kind]
- * @param {object} o.persona  loadPersona 产物
- * @param {function} o.log
- * @returns {Promise<{runtime, box}>}
+ * 底子那份 config（forge 开新舱拼在最前面的料：buildForgeBaseText 要读的全部路径）。
+ * 2026-10-22 摘出来：面板（src/panel）要在子进程里用**同一份**口径预演「下次换舱拼什么」，
+ * 不许另抄一份路径表 —— 抄一份迟早漂。buildBox 照旧把它摊进 runtime 的 config。
  */
-async function buildBox({ cfg, backend, persona, log = () => {} }) {
-  // 运行时会在 stateDir 底下开一个 unix socket，**它假定这个目录已经存在**
-  // （生产里 ~/.nova 一直都在，所以这个洞从没暴露过；换个新家第一次起就炸：
-  //  ENOENT chmod …/claudecode-runtime.sock）。这儿先把家建好。
+function forgeBaseConfig(cfg) {
   const stateDir = path.join(cfg.root, "state");
-  fs.mkdirSync(stateDir, { recursive: true });
-
-  // 全本（S1）：GATE_HISTORY=on 才有，关着是 null —— 运行时和盒子拿到 null 就是原来的行为。
-  const history = createHistory({ root: cfg.root, persona: cfg.personaName || "", log });
-
-  const runtime = backend.runtime({
-    stateDir,
-    sessionsFile: path.join(stateDir, "sessions.json"),
+  return {
     // ⚠️ forge 就靠这份料（换舱时把最近冷层原话当真实轮塞回新舱）。
     // 这个文件对 runtime 是**只读**的，不会拿老格式回写污染四字段。
     conversationSourceFile: cfg.coldFile,
@@ -70,6 +57,31 @@ async function buildBox({ cfg, backend, persona, log = () => {} }) {
     // 测试必须传隔离文件，否则底子测试会读到生产 notebook.json（9-21 真撞上过：他刚写的一条把断言弄红）。
     notebookModule: cfg.notebookModule || process.env.NOVA_NOTEBOOK_MODULE || "",
     notebookFile: cfg.notebookFile || process.env.NOVA_NOTEBOOK_FILE || "",
+  };
+}
+
+/**
+ * @param {object} o
+ * @param {object} o.cfg      `main.js` 的 readConfig 产物
+ * @param {object} o.backend  BOXES[kind]
+ * @param {object} o.persona  loadPersona 产物
+ * @param {function} o.log
+ * @returns {Promise<{runtime, box}>}
+ */
+async function buildBox({ cfg, backend, persona, log = () => {} }) {
+  // 运行时会在 stateDir 底下开一个 unix socket，**它假定这个目录已经存在**
+  // （生产里 ~/.nova 一直都在，所以这个洞从没暴露过；换个新家第一次起就炸：
+  //  ENOENT chmod …/claudecode-runtime.sock）。这儿先把家建好。
+  const stateDir = path.join(cfg.root, "state");
+  fs.mkdirSync(stateDir, { recursive: true });
+
+  // 全本（S1）：GATE_HISTORY=on 才有，关着是 null —— 运行时和盒子拿到 null 就是原来的行为。
+  const history = createHistory({ root: cfg.root, persona: cfg.personaName || "", log });
+
+  const runtime = backend.runtime({
+    stateDir,
+    sessionsFile: path.join(stateDir, "sessions.json"),
+    ...forgeBaseConfig(cfg),
     // 开场注入归**盒子 + 人格**管（见 persona.js）。运行时自带的那一包必须关掉，
     // 否则它会把人格那一段裹进 `Current user message:`，标成她说的话。
     disableOpeningPack: true,
@@ -104,4 +116,4 @@ async function buildBox({ cfg, backend, persona, log = () => {} }) {
   return { runtime, box };
 }
 
-module.exports = { buildBox, readColdTail };
+module.exports = { buildBox, readColdTail, forgeBaseConfig };

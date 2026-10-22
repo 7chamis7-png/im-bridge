@@ -86,7 +86,8 @@ function normalizeAnswers(raw, { home = os.homedir() } = {}) {
     }
   }
   a.deepseekKey = String(a.deepseekKey || "").trim();
-  a.codexHome = expandHome(a.codexHome || path.join(home, ".codex"), home);
+  // 2026-10-22 数据隔离：默认每个角色一份自己的 codex 家（~/.<id>-codex），不跟同机别的角色共用 ~/.codex
+  a.codexHome = expandHome(a.codexHome || path.join(home, `.${a.id}-codex`), home);
   a.heart = a.heart === true || a.heart === "yes" || a.heart === "y";
   // ——— 共用能力（都可选；不填 = 关着，doctor 会明说是关着的）———
   const obj = (v) => (v && typeof v === "object" ? { ...v } : {});
@@ -204,7 +205,8 @@ function planRole(a, { home = os.homedir(), repo = REPO_ROOT, nodePath = process
   add("GATE_MODEL", "", "空着 = models.json + /model 说了算；钉值会让 /model 一律被拒");
   add("GATE_BOX_CONTEXT_LIMIT", String(window), "上下文上限（报水位用），换模型记得改");
   add("GATE_CLAUDE_PERMISSION_MODE", "acceptEdits", "默认档下每个工具都要问许可、没人应答会挂死");
-  if (a.engine === "codex") add("CODEX_HOME", a.codexHome, "codex 的登录态 / thread 在这儿；CODEX_HOME=… codex login");
+  // 总是写：不选 codex 的角色以后 /engine 切到 codex 也要用它自己的（没登录 = 切的时候明确报错，不借别人的）
+  add("CODEX_HOME", a.codexHome, "这个角色自己的 codex 登录态 / thread；用 codex 前先 CODEX_HOME=… codex login");
   if (a.engine === "deepseek") {
     add("DEEPSEEK_ALLOW_BILLING", "1", "按量计费的钱闸：init 时选了 deepseek = 明确同意");
     add("DEEPSEEK_SECRET", `${a.id}-deepseek`);
@@ -272,7 +274,7 @@ function planRole(a, { home = os.homedir(), repo = REPO_ROOT, nodePath = process
     "#!/usr/bin/env bash",
     `# ${a.agentName} 的 ${what}（pm2: ${a.id}-${proc}）。由 im-bridge init 生成。`,
     "set -e",
-    `[ -z "$IMB_CLEAN_ENV" ] && exec env -i IMB_CLEAN_ENV=1 HOME=${shq(home)} PATH=${shq(PATH)} bash "$0" "$@"`,
+    `[ "\${IMB_CLEAN_ENV:-}" = "$$" ] || exec env -i IMB_CLEAN_ENV=$$ HOME=${shq(home)} PATH=${shq(PATH)} bash "$0" "$@"`,
     `. ${shq(envFile)}`,
     ...extra,
     `cd ${shq(repo)}`,
@@ -405,7 +407,7 @@ async function interactive(a) {
     a.ownerTelegramId = await ask(rl, "你的 Telegram 数字 id（@userinfobot 能查）", a.ownerTelegramId || "");
     a.engine = await ask(rl, "引擎（claude-cli / codex / deepseek）", a.engine || "claude-cli");
     if (a.engine === "deepseek") a.deepseekKey = await ask(rl, "DeepSeek API key（可以先空着，回头放进 ~/.secrets）", a.deepseekKey || "", { secret: true });
-    if (a.engine === "codex") a.codexHome = await ask(rl, "CODEX_HOME（codex 登录态放哪）", a.codexHome || path.join(os.homedir(), ".codex"));
+    if (a.engine === "codex") a.codexHome = await ask(rl, "CODEX_HOME（codex 登录态放哪）", a.codexHome || path.join(os.homedir(), `.${a.id}-codex`));
     const ch = await ask(rl, "渠道（telegram 必选；还可以加 imessage / wechat，逗号分隔）", (a.channels || ["telegram"]).join(","));
     a.channels = ch.split(",").map((s) => s.trim()).filter(Boolean);
     if (a.channels.includes("imessage")) {

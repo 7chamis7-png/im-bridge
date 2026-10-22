@@ -39,6 +39,13 @@ function createRemoteRuntime({
   reconnectMs = 500,
   maxReconnectMs = 10_000,
   callTimeoutMs = 60_000,
+  /**
+   * 连不上引擎宿主时，一次调用最多等多久（2026-10-22）。以前 whenReady() 没有超时：
+   * nova-cli 不在，enqueue 就一直挂着，挂满桥那头 300 秒（box-remote）→ 轮次记成 unknown →
+   * 整条队列堵死。现在等到点就抛一个带 notAccepted 的错 —— **这时候一个字节都没写出去**，
+   * 确定没送进去，桥那头会按「拒收」自动退避重投。可用 GATE_CLI_READY_TIMEOUT_MS 改。
+   */
+  readyTimeoutMs = Number(process.env.GATE_CLI_READY_TIMEOUT_MS) || 60_000,
   cursorFlushMs = 200,
 } = {}) {
   if (!socketPath) throw new Error('要给 socketPath。');
@@ -104,10 +111,22 @@ function createRemoteRuntime({
     if (cursorDirty) writeCursor();
   }
 
-  function whenReady() {
+  function whenReady(timeoutMs = readyTimeoutMs) {
     if (connected) return Promise.resolve();
     if (disposed) return Promise.reject(new Error('这个替身已经关了。'));
-    return new Promise((res) => readyWaiters.push(res));
+    return new Promise((res, rej) => {
+      const waiter = () => { clearTimeout(timer); res(); };
+      const timer = setTimeout(() => {
+        readyWaiters = readyWaiters.filter((w) => w !== waiter);
+        const e = new Error(`引擎宿主（nova-cli / iris-cli）${Math.round(timeoutMs / 1000)} 秒没连上，这次没送出去`);
+        // 一个字节都没写出去 = 确定没送进去。box-runtime 的 enqueue catch 本来也会打这个标记，
+        // 但 ensure / start 在那个 try 外面 —— 在源头打上，哪条路上抛出去都是「可放心重投」。
+        e.notAccepted = true;
+        e.code = 'ENGINE_HOST_NOT_READY';
+        rej(e);
+      }, timeoutMs);
+      readyWaiters.push(waiter);
+    });
   }
 
   function flushReady() {
@@ -127,7 +146,12 @@ function createRemoteRuntime({
     const id = 'c-' + nextCallId++;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (waiting.delete(id)) reject(new Error(`引擎宿主（nova-cli / iris-cli）没在 ${timeoutMs}ms 内回 ${method}`));
+        if (!waiting.delete(id)) return;
+        const e = new Error(`引擎宿主（nova-cli / iris-cli）没在 ${timeoutMs}ms 内回 ${method}`);
+        // 2026-10-22：请求**已经写出去了**，对面可能落了盘只是没来得及回 —— 不能当「确定没送进去」。
+        // box-runtime 认这个标记，不再给它打 notAccepted（否则桥会自动重投，他可能把同一句回两遍）。
+        e.maybeAccepted = true;
+        reject(e);
       }, timeoutMs);
       waiting.set(id, { resolve, reject, timer });
       if (!send({ t: CALL, id, method, args })) {
@@ -235,7 +259,10 @@ function createRemoteRuntime({
       for (const [id, w] of waiting) {
         waiting.delete(id);
         clearTimeout(w.timer);
-        w.reject(new Error('跟引擎宿主的连接断了'));
+        // 已经写出去、等回话时断的：同上，对面收没收不知道（2026-10-22）
+        const e = new Error('跟引擎宿主的连接断了');
+        e.maybeAccepted = true;
+        w.reject(e);
       }
       if (disposed) return;
       setTimeout(connect, backoff);

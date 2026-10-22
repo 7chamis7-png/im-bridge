@@ -21,7 +21,8 @@
 
 const net = require("net");
 
-const SOCK = process.env.GATE_PHONE_SOCKET || require("path").join(require("../core/paths").gateRoot(), "phone.sock");
+// 2026-10-22：现用现算（gateRoot 没配会报错，不能在 require 时就炸）
+const sockPath = () => process.env.GATE_PHONE_SOCKET || require("path").join(require("../core/paths").gateRoot(), "phone.sock");
 const MIN = 4;
 const COMMA_MIN = 12;
 const len = (s) => Array.from(s).length;
@@ -53,7 +54,7 @@ function nextCut(buf) {
 
 function sendSay(text, turnId, log) {
   return new Promise((resolve) => {
-    const s = net.createConnection(SOCK);
+    const s = net.createConnection(sockPath());
     let done = false;
     const end = (ok) => { if (done) return; done = true; try { s.destroy(); } catch {} resolve(ok); };
     const t = setTimeout(() => end(false), 8000);
