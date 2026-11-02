@@ -1,0 +1,25 @@
+"use strict";
+// 2026-10-29 群聊单独落冷层
+const assert = require("assert"), fs = require("fs"), os = require("os"), path = require("path");
+const { RoutedColdWriter, isGroupChat } = require("../../src/gate/cold-writer");
+const dir = fs.mkdtempSync(path.join(os.tmpdir(), "coldgrp-"));
+const w = new RoutedColdWriter({ file: path.join(dir, "cold.jsonl") });
+let ok = 0, bad = 0;
+const t = (n, f) => { try { f(); ok++; console.log("  OK  ", n); } catch (e) { bad++; console.log("  FAIL", n, e.message); } };
+const lines = (f) => fs.existsSync(f) ? fs.readFileSync(f, "utf8").trim().split("\n").filter(Boolean).map(JSON.parse) : [];
+t("私聊入站 → 主冷层", () => { w.write({ recordId: "a", role: "user", ev: { channel: "wechat", chatId: "wxid_m", chatType: "private", text: "早" } });
+  assert.equal(lines(w.file).length, 1); });
+t("微信群入站 → 群冷层", () => { w.write({ recordId: "b", role: "user", ev: { channel: "wechat", chatId: "123@chatroom", chatType: "group", text: "[家庭群] 二姨：吃了吗" } });
+  assert.equal(lines(w.file).length, 1); assert.equal(lines(w.groupFile("wechat", "123@chatroom")).length, 1); });
+t("回群的出站 → 群冷层", () => { w.write({ recordId: "c", role: "assistant", text: "吃了", chat: { channel: "wechat", chatId: "123@chatroom" } });
+  assert.equal(lines(w.groupFile("wechat", "123@chatroom")).length, 2); assert.equal(lines(w.file).length, 1); });
+t("回私聊的出站 → 主冷层", () => { w.write({ recordId: "d", role: "assistant", text: "嗯", chat: { channel: "wechat", chatId: "wxid_m" } });
+  assert.equal(lines(w.file).length, 2); });
+t("TG 群（负数 id）出站 → 群冷层", () => { w.write({ recordId: "e", role: "assistant", text: "hi", chat: { channel: "telegram", chatId: "-1000000002" } });
+  assert.equal(lines(w.groupFile("telegram", "-1000000002")).length, 1); });
+t("没给 chat 的出站 → 主冷层（跟以前一样）", () => { w.write({ recordId: "f", role: "assistant", text: "x" }); assert.equal(lines(w.file).length, 3); });
+t("群冷层也只有四个字段", () => assert.deepEqual(Object.keys(lines(w.groupFile("wechat", "123@chatroom"))[0]).sort(), ["at", "id", "role", "text"]));
+t("去重", () => { const r = w.write({ recordId: "b", role: "user", ev: { channel: "wechat", chatId: "123@chatroom", chatType: "group", text: "dup" } });
+  assert.equal(r.written, false); });
+t("isGroupChat", () => { assert.equal(isGroupChat({ channel: "telegram", chatId: "1000000001" }), false); assert.equal(isGroupChat(null), false); });
+console.log(`\n通过 ${ok} / 失败 ${bad}`); process.exit(bad ? 1 : 0);

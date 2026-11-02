@@ -224,7 +224,13 @@ class MediaPipeline {
       // 盘上已是明文、又没什么可加工的（文件/链接/引用）—— 路径/网址已经在正文里给他了。
       // 再复制进文件仓只多一份存货，不多一点信息。跳过。
       // （Alice 9-17：文件"解析不了"其实是**能读却没告诉他路径**，路径别弄丢。）
-      if ((PLAN[kind] || "none") === "none" && (item.localPath || item.ref)) continue;
+      //
+      // ⚠️ 例外（2026-10-23 Alice：微信文件要收进来）：插头可以给某一项挂 `item.store=true`
+      // 显式要求「还是落一份进文件仓」。微信的文件就这么开——它那份明文躺在微信库里，
+      // 是只读的、还会被微信自己清库换库冲掉（10-20 换库就把 9 月的消息行冲没了），
+      // 桥自留一份才靠得住，落了仓也才有统一的 filePath/mime/byteLength 给他。
+      // 链接/引用不挂这个开关，行为一个字不变。
+      if ((PLAN[kind] || "none") === "none" && !item.store && (item.localPath || item.ref)) continue;
 
       let src = null;
       let hintName = item.hintName || "";

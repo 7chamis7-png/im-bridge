@@ -41,6 +41,7 @@ const i18n = require("./i18n");
 const { L } = i18n;
 const { readJson } = require("./state");
 const files = require("./files");
+const coldView = require("./cold-view");
 const { modelChoices, planRotate } = require("./rotate-plan");
 const control = require("./control");
 const { appendAudit, readAudit } = require("./audit");
@@ -292,7 +293,7 @@ function createServer({ env = process.env, now = () => Date.now(), demo = false 
         const rows = [...readAudit(env, { limit: 100 }), ...used].sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, 100);
         return send(res, 200, render.auditPage({ now: t, nav, rows, names }));
       }
-      const m = /^\/c\/([^/]+)\/(base|failures|assembled|tail|writings|rotate|rotate\/job|files|files\/edit|files\/preview|files\/save|files\/done|files\/history|files\/backup|files\/restore)\/?$/.exec(url.pathname);
+      const m = /^\/c\/([^/]+)\/(base|failures|assembled|tail|writings|cold|rotate|rotate\/job|files|files\/edit|files\/preview|files\/save|files\/done|files\/history|files\/backup|files\/restore)\/?$/.exec(url.pathname);
       const ch = m && all.find((c) => c.id === decodeURIComponent(m[1]));
       if (!ch) return send(res, 404, render.notFoundPage());
       const route = m[2];
@@ -388,6 +389,15 @@ function createServer({ env = process.env, now = () => Date.now(), demo = false 
         appendAudit(env, { role: ch.id, action: "tail.exclude", file, before: `${beforeN} 条`, after: `${next.length} 条`, result: "ok",
           detail: `排掉 ${turns.filter((t) => shown.has(t.key) && !keep.has(t.key)).length} 轮（只对下一次换舱）` });
         return send(res, 303, "", { location: `/c/${encodeURIComponent(ch.id)}/tail?saved=1` });
+      }
+
+      // ——— 冷层（只读） ———
+      if (route === "cold") {
+        const sp = url.searchParams;
+        const opts = { q: String(sp.get("q") || "").slice(0, 200), who: ["user", "assistant"].includes(sp.get("who")) ? sp.get("who") : "",
+          d: /^\d{4}-\d{2}-\d{2}$/.test(sp.get("d") || "") ? sp.get("d") : "", p: Number(sp.get("p")) || 1, around: String(sp.get("around") || "").slice(0, 200), start: /^\d+$/.test(sp.get("at") || "") ? sp.get("at") : "" };
+        const r = coldView.query(ch, opts);
+        return send(res, 200, render.coldPage(ch, { ...po, r, opts }));
       }
 
       // ——— 他写的东西 ———

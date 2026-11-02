@@ -147,6 +147,29 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
   const fireReply = (payload) => { fire(replyHandlers, payload); if (history) history.recordReplyOut(payload); };
   const fireDone = (payload) => { fire(doneHandlers, payload); if (history) history.recordTurnDone(payload); };
 
+  /**
+   * 攒着的工具前那几段，现在就发（2026-11-01 边说边发）。
+   * 旁白也发：工具前的旁白就是他在说话（工具前那些「拍好了」之类全是旁白，按老规矩被扔了）。
+   * 只有**最后一次工具之后**、整轮又有正文时，旁白才照老规矩不发 —— 那由 turn.completed 管。
+   */
+  function flushCandidates() {
+    for (const [turnId, list] of candidatesByTurn) {
+      const said = saidByTurn.get(turnId) || new Set();
+      const source = envelopeByTurn.get(turnId) || activeEnvelope;
+      for (const c of list) {
+        if (said.has(c.text)) continue;
+        said.add(c.text);
+        fireReply({
+          turnId, threadId: lastThreadId, text: c.text,
+          genuine: c.synthetic !== true,
+          trace_id: (source && source.trace_id) || "",
+          at: Date.now(),
+        });
+      }
+      saidByTurn.set(turnId, said);
+    }
+  }
+
   runtime.onEvent((event) => {
     const p = (event && event.payload) || {};
     switch (event && event.type) {
@@ -165,6 +188,10 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
       // Alice当天定的：「直接给他所有默认权限 调用任何工具都不要许可」。
       // 所以这里一律放行，不问、也不转发给她。要收紧就改这一个判断。
       case "runtime.approval.requested": {
+        // 2026-11-01 边说边发：他要去调工具了 = 前面那段话说完了，**现在就发**，不攒到整轮结束。
+        // 实测：他在外面跑工具一轮十几分钟，话全攒着（旁白还被整段扔），她那头以为他卡死。
+        // 许可事件不带 turnId；同一时刻只有一轮在跑，所以把所有攒着的都发掉。
+        flushCandidates();
         const requestId = p.requestId;
         if (!requestId) { log("[许可] 事件里没有 requestId，应答不了"); break; }
         const what = Array.isArray(p.commandTokens)
@@ -260,15 +287,22 @@ function makeClaudeCodeBox({ runtime, bindingKey, workspaceRoot, model = "",
         }
 
         // 最终文本没吐过就补一次 —— 漏掉的话，她那头就什么也收不到。
+        // 2026-11-01：工具前那几段现在是当场发的；最终文本要是把它们原样带上了，扣掉再发，免得她看两遍。
         if (finalText && !said.has(finalText)) {
+          let restText = finalText;
+          for (const s of said) {
+            if (s && restText.includes(s)) restText = restText.replace(s, "").trim();
+          }
           said.add(finalText);
-          const source = envelopeByTurn.get(p.turnId) || activeEnvelope;
-          fireReply({
-            turnId: p.turnId, threadId: p.threadId, text: finalText,
-            genuine: p.synthetic !== true,
-            trace_id: (p.trace_id || p.traceId || (source && source.trace_id) || ""),
-            at: Date.now(),
-          });
+          if (restText) {
+            const source = envelopeByTurn.get(p.turnId) || activeEnvelope;
+            fireReply({
+              turnId: p.turnId, threadId: p.threadId, text: restText,
+              genuine: p.synthetic !== true,
+              trace_id: (p.trace_id || p.traceId || (source && source.trace_id) || ""),
+              at: Date.now(),
+            });
+          }
         }
         // silent = 这一整轮一个字都没吐。**这是他选择不说，不是故障**，
         // 但下游必须知道，不然就一直等着。

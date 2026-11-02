@@ -196,7 +196,9 @@ class OutboundGate {
         reason: "hallucination_only", hallucination: clean.kind, text: text || "" });
       return { written: false, id: coldId, skipped: true };
     }
-    const r = this.cold.write({ recordId: coldId, role: "assistant", text: clean.cut ? clean.text : (text || "") });
+    // 发往群的这一轮落群冷层（RoutedColdWriter 按 turn.inboundEvent 认群）
+    const r = this.cold.write({ recordId: coldId, role: "assistant", text: clean.cut ? clean.text : (text || ""),
+      chat: turn && turn.inboundEvent });
     if (clean.cut && r && r.written) {
       this.store.appendEvent({ kind: "cold.hallucination_cut", coldId, turnId: (turn && turn.turnId) || "",
         hallucination: clean.kind, cut: clean.cut.length, preview: clean.cut.slice(0, 200) });

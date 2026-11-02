@@ -10,11 +10,17 @@ const { TurnStore } = require("./turn-store");
 // 次数用完转 unknown（堵住队列 + 守护推给她），由她用 /pending 决定，不再无限重来。
 const RETRY_DEFAULTS = Object.freeze({ maxAttempts: 5, baseMs: 5_000, capMs: 5 * 60_000 });
 
+// 2026-11-01 Alice定：她连着发的几条（字/图/语音一样），最后一条之后 windowMs 内没新的才投，
+// 有新的就合成一轮交给他 —— 不然他一句一句分开回。电话不等（要的就是快）。
+// maxWaitMs 封顶：她一直打字也最多压这么久。windowMs=0 = 关（跟以前一模一样）。
+const MERGE_DEFAULTS = Object.freeze({ windowMs: 0, maxWaitMs: 30_000 });
+
 function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = () => true,
-  reconciler = null, log = () => {}, retry = {}, now = () => Date.now() }) {
+  reconciler = null, log = () => {}, retry = {}, merge = {}, now = () => Date.now() }) {
   const store = new TurnStore({ file });
   store.recover();
   const retryCfg = { ...RETRY_DEFAULTS, ...(retry || {}) };
+  const mergeCfg = { ...MERGE_DEFAULTS, ...(merge || {}) };
   let retryTimer = null;
   let active = null;
   const slots = new Map();
@@ -172,12 +178,60 @@ function makeTurnQueue({ file, box, onReply, onDone, binding = null, enabled = (
     return head;
   }
 
+  /** 能跟谁合：她（user）在同一个聊天里、还排着、没被拒过的；电话不合。 */
+  const mergeKey = (r) => {
+    const s = (r.envelope && r.envelope.source) || {};
+    if (s.kind !== "user" || s.platform === "phone" || r.state !== "queued" || r.attempts) return "";
+    return s.platform + "\u0000" + s.chat_id;
+  };
+
+  /**
+   * 合并窗口（2026-11-01）。返回 null = 还在等她说完，这次先不投（宿主每秒的 recover() 会再来）。
+   * 合的时候：几条的正文按顺序接起来、媒体按顺序排，写进**第一条**的信封（先落盘）；
+   * 后面几条标 completed + mergedInto，冷层早在入闸时一条一条写过了，不受影响。
+   * 先写头、后标尾：中间崩了最多是重复投一遍，不会丢她的话。
+   */
+  function mergeHead(head) {
+    if (!(mergeCfg.windowMs > 0) || head.state !== "queued") return head;
+    const key = mergeKey(head);
+    if (!key) return head;
+    const rows = store.list();
+    const group = [];
+    for (let i = rows.indexOf(rows.find((r) => r.id === head.id)); i < rows.length; i++) {
+      const r = rows[i];
+      if (r.state !== "queued") continue;
+      if (mergeKey(r) !== key) break;
+      group.push(r);
+    }
+    const t = now();
+    const last = Date.parse(group[group.length - 1].queuedAt) || 0;
+    const first = Date.parse(head.queuedAt) || 0;
+    if (t - last < mergeCfg.windowMs && t - first < mergeCfg.maxWaitMs) return null;
+    if (group.length < 2) return head;
+    const env = head.envelope;
+    const texts = group.map((r) => String(r.envelope.payload.text || "").trim()).filter(Boolean);
+    const merged = {
+      ...env,
+      payload: {
+        text: texts.join("\n"),
+        media: group.flatMap((r) => (Array.isArray(r.envelope.payload.media) ? r.envelope.payload.media : [])),
+      },
+    };
+    const ids = group.slice(1).map((r) => r.id);
+    const out = store.update(head.id, { envelope: merged, mergedIds: ids });
+    for (const id of ids) store.update(id, { state: "completed", mergedInto: head.id, reason: "合进 " + head.id });
+    log("[轮次] 她连着发了 " + group.length + " 条，合成一轮：" + head.id);
+    return out;
+  }
+
   async function pump() {
     if (active || stopping || !enabled()) return null;
     // An unacknowledged submission may still be executing in the box. Do not
     // start a later task until that boundary has been reconciled.
     if (store.list().some((r) => r.state === "unknown")) return null;
-    const row = nextRow();
+    let row = nextRow();
+    if (!row) return null;
+    row = mergeHead(row);
     if (!row) return null;
     store.update(row.id, { state: "submitting" });
     const slot = { id: row.id, returned: false, done: null, outputs: [], finishing: false };

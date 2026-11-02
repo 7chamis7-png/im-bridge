@@ -11,7 +11,7 @@
  */
 
 const { GateStore } = require("./store");
-const { ColdWriter } = require("./cold-writer");
+const { RoutedColdWriter } = require("./cold-writer");
 const { InboundGate } = require("./inbound");
 const { OutboundGate } = require("./outbound");
 const { Capabilities } = require("./capabilities");
@@ -57,7 +57,7 @@ function buildGate({ root, coldFile, plugins = {}, capabilities = {}, identities
   // 关舱前那一轮的正文（宿主给；桥不认识里面写的是什么）。不给 = 没有这一步。
   closingNote = null,
   // 2026-10-22：盒子明确拒收后自动重投的次数 / 退避（turn-queue.js 的 RETRY_DEFAULTS），不给用默认
-  turnRetry = {} }) {
+  turnRetry = {}, turnMerge = {} }) {
   // 盒子**必须显式给**：给一个对象 = 五条口当场点名；给 null = 这座桥不往盒子里送
   // （影子那种只读观察）。**不给 = 忘了传**，当场报——9-17 就是靠「可选参数默认空」
   // 把「插头一个都没接」这件事瞒过了装配、瞒过了测试，直到开关一开才发作。
@@ -66,7 +66,8 @@ function buildGate({ root, coldFile, plugins = {}, capabilities = {}, identities
   }
   if (box !== null) assertBox(box);
   const store = new GateStore({ root });
-  const cold = new ColdWriter({ file: coldFile });
+  // 群聊单独落 cold-groups/（2026-10-29），私聊照旧 cold.jsonl —— 见 cold-writer.js RoutedColdWriter
+  const cold = new RoutedColdWriter({ file: coldFile });
 
   // —— 第 1 层：共用能力。每样只有一份，注册重了会自己报错。——
   // **实现由调用方注入**（铁律 1）：闸只说「我要一个能把音频变成字的东西」，
@@ -158,7 +159,7 @@ function buildGate({ root, coldFile, plugins = {}, capabilities = {}, identities
   const pipe = box === null ? null : makePipeline({
     plugins: pluginMap, inbound, outbound, box, router, media, undelivered,
     groups: groupGate, owner, binding, enabled: () => !enforceEnabled || killswitch.enabled(), log,
-    closingNote, retry: turnRetry,
+    closingNote, retry: turnRetry, merge: turnMerge,
   });
 
   // 生产者投递口：一条一个文件，谁都能往里投（独立进程也行）。

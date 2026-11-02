@@ -223,6 +223,36 @@ def set_clipboard_image(png_path: str) -> None:
     )
 
 
+# 发文件时剪贴板放的不是位图，是「一个文件的 URI」。两种格式都见过有人用：
+#   gnome  = x-special/gnome-copied-files，内容 `copy\nfile:///abs/path`（GNOME/Nautilus 那套，
+#            多数 GTK/Electron/Qt 的粘贴都认）
+#   uri    = text/uri-list，内容 `file:///abs/path\r\n`
+# 默认 gnome；拿不准真机认哪个就用 LINUX_WX_FILE_CLIP_FORMAT=uri 切过去（真机实测那步由 Keeper 挑时机做）。
+# ⚠️ 这是**纯函数**：只按路径+格式拼字节，不碰剪贴板、不碰环境——好离线单测。
+def file_clip_payload(file_path: str, fmt: str = "gnome") -> tuple[str, bytes]:
+    from urllib.parse import quote
+    uri = "file://" + quote(os.path.abspath(file_path))
+    fmt = (fmt or "gnome").strip().lower()
+    if fmt == "uri":
+        return ("text/uri-list", (uri + "\r\n").encode("utf-8"))
+    # 默认 gnome
+    return ("x-special/gnome-copied-files", ("copy\n" + uri).encode("utf-8"))
+
+
+def set_clipboard_file(file_path: str) -> None:
+    """把「一个文件」放进剪贴板，让微信输入框 Ctrl+V 粘出文件卡片。
+
+    ⚠️ 跟 set_clipboard_image 同一个坑：xclip 读完会 fork 到后台占住选区，
+    不捕获 stdout，父进程立刻返回（捕获会挂死）。
+    """
+    target, payload = file_clip_payload(file_path, os.environ.get("LINUX_WX_FILE_CLIP_FORMAT", "gnome"))
+    subprocess.run(
+        ["xclip", "-selection", "clipboard", "-t", target, "-i"],
+        input=payload, env=ENV, check=True, timeout=10,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+    )
+
+
 def key(wid: str, *keys: str) -> None:
     for k in keys:
         run(["xdotool", "key", "--window", wid, "--clearmodifiers", k], check=False)
@@ -315,9 +345,37 @@ def send_image(wid: str, f, image_path: str) -> None:
         raise RuntimeError("发送键还亮着，图卡在输入框里没发出去")
 
 
+def send_file(wid: str, f, file_path: str) -> None:
+    """发一个文件（文档类：pdf/word/zip/txt…）。判据跟发图一模一样：
+    发送键亮了才回车，变灰了才算发出去。跟发图唯一的差别是剪贴板放的是文件 URI 不是位图。"""
+    if not os.path.isfile(file_path):
+        raise RuntimeError(f"文件不存在: {file_path}")
+    nodes = ensure_in_chat(wid, f)
+    box = input_box(nodes)
+    if not box:
+        raise RuntimeError("无障碍树里没有输入框，没敢盲发")
+    bx, by, _node = box
+    btn = send_button(nodes)
+    if not btn:
+        raise RuntimeError("无障碍树里没有发送键，没敢盲发")
+    send_node = btn[2]
+
+    click_rel(wid, bx, by)
+    key(wid, "ctrl+a", "BackSpace")
+    set_clipboard_file(file_path)
+    key(wid, "ctrl+v")
+
+    # 文件卡片贴进输入框、微信把发送键点亮，可能比图片略慢（要读文件信息），给足余量
+    if not wait_for(lambda: node_enabled(send_node), DEADLINE_FILLED + 2.0):
+        raise RuntimeError("粘贴后发送键没亮，文件没进去，没发")
+    key(wid, "Return")
+    if not wait_for(lambda: not node_enabled(send_node), DEADLINE_SENT + 2.0):
+        raise RuntimeError("发送键还亮着，文件卡在输入框里没发出去")
+
+
 def main() -> int:
     if len(sys.argv) < 2:
-        print("用法: linux-wx-send-a11y.py [--check | --image <路径>] <文本>", file=sys.stderr)
+        print("用法: linux-wx-send-a11y.py [--check | --image <路径> | --file <路径>] <文本>", file=sys.stderr)
         return 2
     if sys.argv[1] == "--check":
         return 0 if available() else 1
@@ -332,6 +390,15 @@ def main() -> int:
         wid = weixin_wid()
         send_image(wid, frame_node(), sys.argv[2])
         print(f"linux-wechat(a11y) 发图 1 张，{time.time() - t0:.2f}s")
+        return 0
+    if sys.argv[1] == "--file":
+        if len(sys.argv) < 3:
+            print("用法: linux-wx-send-a11y.py --file <文件路径>", file=sys.stderr)
+            return 2
+        t0 = time.time()
+        wid = weixin_wid()
+        send_file(wid, frame_node(), sys.argv[2])
+        print(f"linux-wechat(a11y) 发文件 1 个，{time.time() - t0:.2f}s")
         return 0
     text = sys.argv[1]
     if not text.strip():

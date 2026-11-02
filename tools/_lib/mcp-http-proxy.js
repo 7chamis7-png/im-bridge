@@ -100,7 +100,13 @@ async function post(msg, onMessage) {
   const timer = setTimeout(() => ctl.abort(), TIMEOUT_MS);
   try {
     const res = await fetch(targetUrl(), { method: 'POST', headers, body: JSON.stringify(msg), signal: ctl.signal });
-    const sid = res.headers.get('mcp-session-id');
+    // ⚠ 2026-10-23：**只认成功回包里的会话号**。
+    // python mcp SDK（lmc5 跑的 1.30.0）碰到「没带会话号的非 initialize 请求」时，
+    // 会先 admit 一个新 transport（uuid4）、回 400 Bad Request，**响应头里带着这个新会话号**，
+    // 紧接着把它销毁。旧代码把这个死号记下来 → 下一条 initialize 带着它发出去
+    // → 404 Session not found → CC 判定整包连接失败（Nova 10-19~10-22 记忆手断就是这个）。
+    // 触发源：Claude Code 握手前先探一条 server/discover。
+    const sid = res.ok ? res.headers.get('mcp-session-id') : null;
     if (sid) state.session = sid;
     if (!res.ok) {
       const body = await res.text().catch(() => '');
@@ -140,7 +146,8 @@ async function reinitialize() {
 
 async function handle(msg) {
   const isRequest = msg && msg.id !== undefined && msg.id !== null && typeof msg.method === 'string';
-  if (msg && msg.method === 'initialize') state.initMsg = msg;
+  // initialize 按协议不能带会话号（带了就是拿旧/死号去开新会话），发之前先清掉。
+  if (msg && msg.method === 'initialize') { state.initMsg = msg; state.session = ''; }
   const deliver = (m) => {
     if (m && msg.method === 'initialize' && m.id === msg.id && m.result && m.result.protocolVersion) {
       state.protocolVersion = m.result.protocolVersion;

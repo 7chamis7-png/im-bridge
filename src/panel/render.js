@@ -526,6 +526,20 @@ pre.receipt{margin:12px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12.
 .tt details summary{cursor:pointer;font-size:12px;color:var(--gold-text);list-style:none;margin-top:4px}
 .tt details summary::-webkit-details-marker{display:none}
 .tt details pre{margin:6px 0 0;white-space:pre-wrap;overflow-wrap:anywhere;font:12.5px/1.7 var(--serif);color:var(--ink2);background:var(--paper2);border:1px solid var(--line2);border-radius:6px;padding:8px 10px}
+.coldform{display:flex;flex-wrap:wrap;gap:8px;align-items:center;margin:0 0 6px}
+.coldform input,.coldform select{height:40px;font:14px var(--ui);color:var(--ink);background:var(--panel-solid);border:1px solid var(--line-dark);border-radius:6px;padding:0 10px}
+.coldform input[name=q]{flex:1 1 220px;min-width:0}
+.coldform input:focus,.coldform select:focus{outline:none;border-color:var(--gold);box-shadow:0 0 0 3px var(--gold-soft)}
+.cr{padding:12px 4px;border-bottom:1px solid var(--line2);scroll-margin-top:140px}
+.cr.me{background:var(--paper2)}
+.cr.focus{background:var(--gold-soft);border-radius:6px;padding:12px 8px;box-shadow:inset 3px 0 0 var(--gold)}
+.cr .who{font:11.5px var(--ui);color:var(--muted);margin-bottom:4px;display:flex;gap:10px;flex-wrap:wrap}
+.cr .who b{color:var(--gold-text);font-weight:600}
+.cr .who a{color:var(--gold-text)}
+.cr pre{margin:0;white-space:pre-wrap;overflow-wrap:anywhere;font:13.5px/1.75 var(--serif);color:var(--ink)}
+.cr details summary{cursor:pointer;font-size:12px;color:var(--gold-text);list-style:none;margin-top:4px}
+.cr mark{background:var(--gold-soft);color:inherit;border-radius:2px;padding:0 1px}
+.pager{display:flex;gap:8px;align-items:center;justify-content:center;margin:14px 0 0;font:13px var(--ui);color:var(--muted)}
 .wgrp{border-top:1px solid var(--line2)}
 .wgrp>summary{list-style:none;cursor:pointer;padding:12px 4px;display:flex;justify-content:space-between;gap:10px;align-items:baseline}
 .wgrp>summary::-webkit-details-marker{display:none}
@@ -719,7 +733,7 @@ function charCard(c, gem, now) {
   const cid = encodeURIComponent(c.id);
   parts.push(`<div class="acts"><a class="btn primary" href="/c/${cid}/base">${esc(L("这一舱装了什么"))} ${I.arrow}</a><a class="btn" href="/c/${cid}/failures">${esc(L("出错详情"))}</a></div>`
     + `<div class="acts acts2"><a class="btn rot" href="/c/${cid}/rotate">${I.rotate}${esc(L("换舱"))}</a><a class="btn" href="/c/${cid}/files">${I.quill}${esc(L("改文件"))}</a></div>`
-    + `<div class="links"><a class="more-link" href="/c/${cid}/assembled">${esc(L("整舱拼好的全文"))} ${I.arrow}</a><a class="more-link" href="/c/${cid}/tail">${esc(L("暖尾巴挑选"))} ${I.arrow}</a><a class="more-link" href="/c/${cid}/writings">${esc(L("他写的东西"))} ${I.arrow}</a></div>`);
+    + `<div class="links"><a class="more-link" href="/c/${cid}/assembled">${esc(L("整舱拼好的全文"))} ${I.arrow}</a><a class="more-link" href="/c/${cid}/tail">${esc(L("暖尾巴挑选"))} ${I.arrow}</a><a class="more-link" href="/c/${cid}/writings">${esc(L("他写的东西"))} ${I.arrow}</a><a class="more-link" href="/c/${cid}/cold">${esc(L("翻冷层"))} ${I.arrow}</a></div>`);
   return `<section class="ch gem-${gem}" id="c-${esc(c.id)}">${top}<div class="ch-body">${parts.join("")}</div></section>`;
 }
 
@@ -1314,5 +1328,64 @@ function writingsPage(ch, { gem, now, nav, w } = {}) {
   return actShell(ch, { title: L("{0} · 他写的东西", ch.id), crumb: L("{0} · 他写的东西", name), active: "files:" + ch.id, nav, now, gem, content: parts.join("") });
 }
 
-module.exports = { codeLoginPage, assembledPage, tailPage, writingsPage, homePage, basePage, failuresPage, unauthorizedPage, loginPage, linkDeadPage, notFoundPage, fmtTime, fmtDur, esc, GEMS,
+// ——— 翻冷层（2026-10-26，只读）———
+function markWords(text, words) {
+  let out = esc(text);
+  for (const w of words || []) {
+    const ew = esc(w).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    if (ew) out = out.replace(new RegExp(ew, "gi"), (m) => `<mark>${m}</mark>`);
+  }
+  return out;
+}
+function coldPage(ch, { gem, now, nav, r, opts = {} } = {}) {
+  const name = ch.displayName || ch.id;
+  const cid = enc(ch.id);
+  const parts = [viewHead("THE ARCHIVE · " + L("冷层"), L("{0} · 翻冷层", name),
+    esc(L("所有真实送达过的对话原文，按关键词 / 日期 / 谁说的筛。只读，一个字都不改。点「定位」跳到那条在聊天里的位置，上下接着翻。")), true)];
+  const sel = (v, cur) => (v === cur ? " selected" : "");
+  parts.push(`<form class="coldform" method="get" action="/c/${cid}/cold">`
+    + `<input name="q" value="${esc(opts.q || "")}" placeholder="${esc(L("关键词，空格隔开 = 都要有"))}" enterkeyhint="search">`
+    + `<input name="d" type="date" value="${esc(opts.d || "")}" aria-label="${esc(L("日期"))}">`
+    + `<select name="who" aria-label="${esc(L("谁说的"))}"><option value="">${esc(L("都看"))}</option><option value="user"${sel("user", opts.who)}>${esc(L("只看她"))}</option><option value="assistant"${sel("assistant", opts.who)}>${esc(L("只看他"))}</option></select>`
+    + `<button class="btn primary" type="submit">${esc(L("查"))}</button><a class="btn" href="/c/${cid}/cold">${esc(L("清空"))}</a></form>`);
+  if (!r || !r.ok) {
+    parts.push(`<div class="err">${esc(L("读不了冷层：{0}", (r && r.error) || "?"))}</div>`);
+    return actShell(ch, { title: L("{0} · 冷层", ch.id), crumb: L("{0} · 冷层", name), active: "base:" + ch.id, nav, now, gem, content: parts.join("") });
+  }
+  const words = r.words || [];
+  const PREVIEW = 400;
+  const item = (x, { full = false } = {}) => {
+    const t = x.text || "";
+    const long = !full && t.length > PREVIEW;
+    const body = long ? `<pre>${markWords(t.slice(0, PREVIEW) + "…", words)}</pre><details><summary>${esc(L("展开全文 ›"))}</summary><pre>${markWords(t, words)}</pre></details>`
+      : `<pre>${markWords(t, words) || esc(L("（空）"))}</pre>`;
+    return `<div id="m-${esc(x.id)}" class="cr${x.role === "user" ? " me" : ""}${x.focus ? " focus" : ""}"><div class="who"><b>${esc(T(WHO, x.role) || x.role)}</b><span>${esc(fmtDay(x.at))}</span>`
+      + (r.mode === "list" ? `<a href="/c/${cid}/cold?around=${enc(x.id)}#m-${enc(x.id)}">${esc(L("定位到聊天里 ›"))}</a>` : "") + `</div>${body}</div>`;
+  };
+  let head;
+  if (r.mode === "stream") {
+    head = r.missing ? L("找不到这一条（冷层里没有这个编号）") : L("聊天记录 · 第 {0}–{1} 条", (r.from + 1).toLocaleString(), r.to.toLocaleString());
+  } else {
+    const filt = [opts.q && L("含「{0}」", opts.q), opts.d && opts.d, opts.who && T(WHO, opts.who) + L("说的")].filter(Boolean).join(" · ");
+    head = filt ? L("{0}：{1} 条", filt, r.matched.toLocaleString()) : L("最新的在上 · 共 {0} 条", r.total.toLocaleString());
+  }
+  const pageLink = (p) => { const u = new URLSearchParams(); if (opts.q) u.set("q", opts.q); if (opts.d) u.set("d", opts.d); if (opts.who) u.set("who", opts.who); u.set("p", p); return `/c/${cid}/cold?${u}`; };
+  const pager = r.mode === "list" && r.pages > 1 ? `<div class="pager">${r.page > 1 ? `<a class="btn" href="${pageLink(r.page - 1)}">${esc(L("‹ 上一页"))}</a>` : ""}`
+    + `<span>${esc(L("第 {0} / {1} 页", r.page, r.pages))}</span>${r.page < r.pages ? `<a class="btn" href="${pageLink(r.page + 1)}">${esc(L("下一页 ›"))}</a>` : ""}</div>` : "";
+  parts.push(`<section class="panel pad"><div class="ph"><div><h3 class="pt">${esc(head)}</h3>`
+    + `<div class="ps">${esc(L("冷层从 {0} 到 {1}，共 {2} 条", fmtDay(r.first), fmtDay(r.last), r.total.toLocaleString()))}${r.bad ? esc(L(" · {0} 行坏的跳过了", r.bad)) : ""}</div></div>`
+    + (r.mode === "stream" ? `<a class="more-link" href="javascript:history.back()">${esc(L("‹ 回搜索"))}</a>` : "") + `</div>`
+    + (r.mode === "stream" && r.prev != null ? `<div class="pager" style="margin:0 0 10px"><a class="btn" href="/c/${cid}/cold?at=${r.prev}#m-${enc(r.items[0].id)}">${esc(L("‹ 更早的"))}</a></div>` : "")
+    + (r.items.length ? r.items.map((x) => item(x, { full: r.mode === "stream" })).join("") : `<div class="empty"><b>${esc(L("没找到"))}</b></div>`)
+    + pager + (r.mode === "stream" && r.next != null ? `<div class="pager"><a class="btn" href="/c/${cid}/cold?at=${r.next}">${esc(L("更晚的 ›"))}</a></div>` : "")
+    + `</section>`);
+  return actShell(ch, { title: L("{0} · 冷层", ch.id), crumb: L("{0} · 冷层", name), active: "base:" + ch.id, nav, now, gem, content: parts.join("") });
+}
+function fmtDay(ms) {
+  if (!ms) return "—";
+  const p = bjParts(ms);
+  return `${p.year}-${p.month}-${p.day} ${p.hour}:${p.minute}`;
+}
+
+module.exports = { coldPage, codeLoginPage, assembledPage, tailPage, writingsPage, homePage, basePage, failuresPage, unauthorizedPage, loginPage, linkDeadPage, notFoundPage, fmtTime, fmtDur, esc, GEMS,
   rotateConfirmPage, rotateResultPage, filesPage, editPage, diffPage, writeResultPage, historyPage, backupPage, auditPage, refusedPage };

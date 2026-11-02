@@ -50,6 +50,36 @@ function isReplicateApiKey(key) {
   return key.startsWith('r8_');
 }
 
+// codex 供应商：NOVA_IMAGE_PROVIDER=codex，或 key 写成 `codex:` / `codex:/path/auth.json`
+function isCodexProvider(config, apiKey) {
+  const prov = norm(config && config.imageProvider).toLowerCase();
+  return prov === 'codex' || apiKey.startsWith('codex:');
+}
+
+// auth.json 路径：key 里带的优先（codex:<path>），否则配置项，否则默认
+function resolveCodexAuthFile(apiKey, config) {
+  if (apiKey.startsWith('codex:')) {
+    const p = apiKey.slice('codex:'.length).trim();
+    if (p) return p;
+  }
+  return norm(config.imageCodexAuthFile) || '/root/.codex/auth.json';
+}
+
+// **只读** auth.json 拿 OAuth token —— 绝不回写、绝不触发刷新（刷新交给别人的 codex 进程）
+function readCodexToken(authFile) {
+  let raw;
+  try { raw = fs.readFileSync(authFile, 'utf8'); }
+  catch (e) { throw new Error(`Codex image: cannot read auth file ${authFile}: ${e.message}`); }
+  let auth;
+  try { auth = JSON.parse(raw); } catch { throw new Error(`Codex image: auth file ${authFile} is not valid JSON.`); }
+  const tokens = (auth && auth.tokens) || {};
+  const accessToken = norm(tokens.access_token);
+  const accountId = norm(tokens.account_id);
+  if (!accessToken) throw new Error(`Codex image: no access_token in ${authFile} (登录过期？让 codex 刷新或重新登录).`);
+  if (!accountId) throw new Error(`Codex image: no account_id in ${authFile}.`);
+  return { accessToken, accountId };
+}
+
 function splitReplicateModel(model) {
   const [owner, ...rest] = model.split('/');
   const name = rest.join('/');
@@ -123,11 +153,62 @@ async function generateImages(args = {}, config = {}, deps = {}) {
   const prompt = norm(args.prompt);
   if (!prompt) throw new Error('Missing image prompt.');
   const apiKey = norm(config.imageApiKey);
-  if (!apiKey) throw new Error('Missing image API key. Set NOVA_IMAGE_API_KEY or OPENAI_API_KEY.');
   const n = clampInteger(args.n, 1, 4, 1);
   const timeoutMs = Number.isFinite(config.imageTimeoutMs) ? config.imageTimeoutMs : 120_000;
   const ctx = { args, prompt, apiKey, n, timeoutMs, config, fetchImpl, sleep, now };
+  // codex 分支不要 api key（token 从 auth.json 读）——所以在「缺 key」检查之前分流
+  if (isCodexProvider(config, apiKey)) return generateCodex(ctx);
+  if (!apiKey) throw new Error('Missing image API key. Set NOVA_IMAGE_API_KEY or OPENAI_API_KEY.');
   return isReplicateApiKey(apiKey) ? generateReplicate(ctx) : generateOpenAI(ctx);
+}
+
+// gpt-image via codex 后端（ChatGPT 订阅 OAuth，不花 API 钱）。形状跟 OpenAI 分支一样，
+// 只换 endpoint + 那几个 codex 头；落盘复用同一套 b64 逻辑。
+async function generateCodex({ args, prompt, n, timeoutMs, config, fetchImpl, now }) {
+  const rawModel = norm(args.model) || norm(config.imageModel) || 'gpt-image-2';
+  // ⚠️ config.imageModel 老配置可能残留 Replicate 的 owner/model（flux-schnell）；codex 只认 gpt-image*
+  const model = rawModel.includes('/') ? 'gpt-image-2' : rawModel;
+  const size = norm(args.size) || '1024x1024';
+  const quality = norm(args.quality);
+  const background = norm(args.background);
+  const payload = { model, prompt, n, size };
+  if (quality) payload.quality = quality;
+  if (background) payload.background = background;
+
+  const { accessToken, accountId } = readCodexToken(resolveCodexAuthFile(norm(config.imageApiKey), config));
+  const base = (norm(config.imageCodexBaseUrl) || 'https://chatgpt.com/backend-api/codex').replace(/\/+$/, '');
+  const version = norm(config.imageCodexVersion) || '0.163.0';
+
+  const json = await fetchJson(fetchImpl, `${base}/images/generations`, {
+    method: 'POST',
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      'chatgpt-account-id': accountId,
+      originator: 'codex_cli_rs',
+      'user-agent': `codex_cli_rs/${version}`,
+      version,
+      'content-type': 'application/json',
+      accept: 'application/json',
+    },
+    body: JSON.stringify(payload),
+    timeoutMs,
+    errorPrefix: 'Codex image API',
+  });
+  const items = Array.isArray(json.data) ? json.data : [];
+  if (!items.length) throw new Error('Codex image API returned no images.');
+
+  const { outputDir, createdAt } = prepareOutputDir(config.imageOutputDir, now);
+  const files = [];
+  items.forEach((item, i) => {
+    const b64 = norm(item.b64_json);
+    if (!b64) return;
+    const filePath = path.join(outputDir, `${createdAt}-${i + 1}.png`);
+    fs.writeFileSync(filePath, Buffer.from(b64, 'base64'));
+    ensurePng(filePath);
+    files.push({ filePath, bytes: fs.statSync(filePath).size });
+  });
+  if (!files.length) throw new Error('Codex image API response did not include b64_json images.');
+  return { files, model, size, prompt };
 }
 
 async function generateOpenAI({ args, prompt, apiKey, n, timeoutMs, config, fetchImpl, now }) {
@@ -233,4 +314,4 @@ function ensurePng(filePath) {
   } catch { /* 转不了就留原样 */ }
 }
 
-module.exports = { ensurePng, generateImages, sizeToAspectRatio, splitReplicateModel, clampInteger, normalizeBaseUrl, isReplicateApiKey };
+module.exports = { ensurePng, generateImages, sizeToAspectRatio, splitReplicateModel, clampInteger, normalizeBaseUrl, isReplicateApiKey, isCodexProvider, resolveCodexAuthFile, generateCodex };

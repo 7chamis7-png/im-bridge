@@ -17,7 +17,7 @@ const path = require("path");
 const { notSent } = require("../../errors");
 const { parseAppmsg, renderAppmsg } = require("./appmsg");
 const {
-  sniffImage, imgMd5FromXml, locateImageDat, isWxgf, decodeWxgf, decodeWechatSilk,
+  sniffImage, imgMd5FromXml, thumbLengthFromXml, locateImageDat, isWxgf, decodeWxgf, decodeWechatSilk,
 } = require("./media");
 
 const ZSTD_MAGIC = Buffer.from([0x28, 0xb5, 0x2f, 0xfd]);
@@ -167,11 +167,18 @@ function pickImagePath({ intent, asset, extras, toolArgs, text, stickerBook = nu
 
 class WeChatPlugin {
   /** @param {{sender?: function, skipDecompress?: boolean}} opts skipDecompress 仅用于复现旧 bug */
-  constructor({ sender, imageSender, voiceSender, caller, hangUp, filesRoot = "", skipDecompress = false,
+  constructor({ sender, imageSender, voiceSender, fileSender, caller, hangUp, filesRoot = "", skipDecompress = false,
     imageKey = "", attachRoot = "", imageFileLookup = null, imageFilesByTime = null, wxgfDecode = decodeWxgf,
     voiceLookup = null, silkDecode = decodeWechatSilk, stickerBook = null, stickerOwner = "",
-    keysFile = "", whitelistFile = "", python = "python3",
-    pollTimeoutMs = 180_000, accountId = "wechat", log = () => {} } = {}) {
+    keysFile = "", whitelistFile = "", python = "python3", fileMaxBytes = 64 * 1024 * 1024,
+    pollTimeoutMs = 180_000, accountId = "wechat", log = () => {},
+    defaultTarget = "", groupTitles = {}, selfNames = [], botIds = [], setTargetResolver = null } = {}) {
+    // 2026-10-29 群：群 id → 群名（出站找窗口用）、自己在群里可能被 @ 的名字、群里哪些号是别的 AI
+    this.defaultTarget = String(defaultTarget || "");
+    this.chatTitles = new Map(Object.entries(groupTitles || {}));
+    this.selfNames = Array.isArray(selfNames) ? selfNames : [];
+    this.botIds = new Set((botIds || []).map(String));
+    if (typeof setTargetResolver === "function") setTargetResolver((chatId) => this.targetFor(chatId));
     // 贴纸本（路径在装配时给）。没给就是没接，发贴纸时会明说，不会偷偷发文字。
     this.stickerBook = stickerBook;
     this.stickerOwner = String(stickerOwner || "");
@@ -182,7 +189,11 @@ class WeChatPlugin {
     // VPS 直读这条路出站走无障碍点击，目前只能打字
     this.capabilities = {
       send_text: "supported",
-      send_file: "unsupported",              // 文件要走「发送文件」对话框，还没做
+      // 2026-10-23：**能发文件了**。跟发图片同一条路——无障碍把文件放进剪贴板
+      // （x-special/gnome-copied-files：`copy\nfile://…`，或 text/uri-list）→ 聚焦输入框
+      // → Ctrl+V → 判据跟发字/发图一样「发送键亮了才回车、变灰了才算发出去」。
+      // 走的还是那把发送锁（GATE_WECHAT_SEND_LOCK），不加频率、不碰风控那条红线。
+      send_file: "supported",
       // 2026-09-18：**能发了**。微信没有「发音频文件当语音」的口子，但语音条本来
       // 就是录出来的 —— 造一个虚拟麦克风，把合成好的声音放进去让它自己录。
       // Alice那句「虚拟麦克风也不行？」问出来的，当天实测她收到了真语音气泡。
@@ -205,6 +216,8 @@ class WeChatPlugin {
     };
     this.imageSender = imageSender;
     this.voiceSender = voiceSender;
+    this.fileSender = fileSender;
+    this.fileMaxBytes = Number(fileMaxBytes) || 64 * 1024 * 1024;
     this.caller = caller;
     this.hangUp = hangUp;
     this.skipDecompress = skipDecompress;
@@ -277,6 +290,12 @@ class WeChatPlugin {
         local_id: r.local_id,
         local_type: r.local_type,
         sender: r.sender,
+        // 2026-10-29 群：采集器交出群 id / 群名 / 发言人昵称 / 自己的昵称（判 @ 他）
+        chat: r.chat || r.sender,
+        chat_name: r.chat_name || "",
+        is_group: Boolean(r.is_group),
+        from_name: r.from_name || "",
+        self_name: r.self_name || "",
         create_time: r.create_time,
         // 语音要靠它去 media_0.db 找字节；采集器 2026-09-18 起带出来
         server_id: r.server_id,
@@ -286,6 +305,40 @@ class WeChatPlugin {
       },
     }));
     return { items, cursor: parsed.cursor || since };
+  }
+
+  /**
+   * 群消息要交给共用层的那几样事实（src/gate/group.js 文件头：chatType / senderId / senderName / addressing）。
+   * 「叫不叫醒他」不在这儿判，这里只说事实：有没有 @ 他、说话的是不是另一个 AI。
+   */
+  #groupFields(row, body) {
+    const chatId = String(row.chat || "");
+    if (row.chat_name) this.chatTitles.set(chatId, String(row.chat_name));
+    const selfNames = [row.self_name, ...this.selfNames].map((x) => String(x || "").trim()).filter(Boolean);
+    const t = String(body || "");
+    return {
+      chatId,
+      chatType: "group",
+      groupName: String(row.chat_name || this.chatTitles.get(chatId) || ""),
+      senderName: String(row.from_name || row.sender || ""),
+      addressing: {
+        mentionsMe: selfNames.some((n) => t.includes("@" + n)),
+        repliedToMe: false,                       // 微信引用回复在 appmsg 里，先不认
+        senderIsBot: this.botIds.has(String(row.sender || "")),
+      },
+    };
+  }
+
+  /**
+   * 出站发给哪个聊天窗（无障碍靠窗口标题认）。私聊照旧 = GATE_WECHAT_TARGET（她那一格）；
+   * 群 = 群名（入站时记下的，或 GATE_WECHAT_GROUP_TITLES 配的）。认不出就拒发，绝不猜。
+   */
+  targetFor(chatId) {
+    const id = String(chatId || "");
+    if (!id.endsWith("@chatroom")) return this.defaultTarget;
+    const t = this.chatTitles.get(id);
+    if (!t) throw notSent(`不知道群 ${id} 叫什么（还没收到过这个群的消息，也没配 GATE_WECHAT_GROUP_TITLES），没敢发`);
+    return t;
   }
 
   /**
@@ -302,7 +355,9 @@ class WeChatPlugin {
       processing.push("decompressed");
     }
 
-    const text = buf.toString("utf8").split(NUL).join("");
+    let text = buf.toString("utf8").split(NUL).join("");
+    // 群消息正文前面带一截「发言人wxid:\n」（2026-10-29 读库实测），发言人另有字段，这截剥掉
+    if (row.is_group) text = text.replace(/^[A-Za-z0-9_@.-]+:\n/, "");
     const { type, appmsg } = splitLocalType(row.local_type);
     const kind = TYPE_LABEL[type];
     const media = [];
@@ -324,7 +379,19 @@ class WeChatPlugin {
       }
       body = renderAppmsg(sub, a);
       const item = { kind: sub, ref: a.url || "", appmsgType: appmsg, card: a };
-      if (a.localPath) item.localPath = a.localPath;
+      if (a.localPath) {
+        item.localPath = a.localPath;
+        // 文件：除了把路径塞进正文（Nova能直接读），还让共用层把这份明文**复制进桥的文件仓**。
+        // 为什么要复制：微信库里那份是只读的、会被微信自己清理/换库（10-20 那次换库就把
+        // 9 月的消息行冲掉了，文件还在但消息没了），桥自己留一份才靠得住；而且落了仓才有
+        // 统一的 filePath/mime/byteLength 给他（跟图片/语音一个待遇）。
+        // ⚠️ `store` 是**退出"文件/链接/引用不落仓"那条默认**的显式开关（见 media-pipeline.hydrate）。
+        // 只对**盘上真有**的文件开（a.localPath 为空时不开，missing 文件照旧只留标注，不走取字节）。
+        if (sub === "file") {
+          item.fileName = a.fileName;
+          item.store = true;
+        }
+      }
       media.push(item);
     } else if (type === 47) {
       // 动画表情。**XML 里给了明文 HTTP 直链** —— 2026-09-17 实测下下来是
@@ -339,7 +406,11 @@ class WeChatPlugin {
       // 加密的 `_h.dat`（V2 容器）。**这里只带定位信息**（md5 + 表名），
       // 真解密在 fetchMedia 里做 —— toDelivery 保持轻、可同步、不读大文件。
       // md5 从（已解压的）XML 里挑；对上是哪张 .dat 也靠它（见 wechat-media）。
-      media.push({ kind: "image", ref: "", md5: imgMd5FromXml(text), table: row.table || "" });
+      // thumbLength = XML 的 cdnthumblength。md5 在 hardlink.db 里查不到时（她按原图发、
+      // 客户端转码落盘），这个数是唯一还能精确认出"是哪张"的凭据 —— 连发两张时全靠它
+      // 区分（2026-10-23，见 media.js locateImageDat 的 ①′）。
+      media.push({ kind: "image", ref: "", md5: imgMd5FromXml(text), table: row.table || "",
+        thumbLength: thumbLengthFromXml(text) });
     } else if (type === 34) {
       // 语音。blob 不在主库，在 media_0.db/VoiceInfo，靠 server_id 对上（唯一）。
       // 同样只带定位信息，取字节 + 解 SILK 在 fetchMedia 里。
@@ -357,9 +428,8 @@ class WeChatPlugin {
     return {
       channel: this.channel,
       accountId: row.accountId || "wechat",
-      senderId: row.sender || "",              // 真实平台身份
-      chatId: row.sender || "",
-      chatType: "private",
+      senderId: row.sender || "",              // 真实平台身份（群里 = 群里说话的那个人）
+      ...(row.is_group ? this.#groupFields(row, body) : { chatId: row.sender || "", chatType: "private" }),
       // **平台原生 local_id，不是文件行号**。现网 bridge.js 用 aw-N，
       // 文件一重写号就变，同一条消息在不同时候是不同 ID。
       // ⚠️ 2026-09-17 影子第一轮抓到：微信每个会话一张 Msg_xxx 表，
@@ -396,6 +466,7 @@ class WeChatPlugin {
       const hit = locateImageDat({
         table: item.table, md5: item.md5, createTime: ctx.createTime,
         attachRoot: this.attachRoot, imageKey: this.imageKey, fileNameHint, fileNameHints,
+        thumbLength: item.thumbLength || 0,
       });
       // 找不到文件 = 还没下下来（高清没下、中间版也没到）。不冒充，如实报。
       if (!hit) return { bytes: null, failed: "image_not_downloaded" };
@@ -412,6 +483,27 @@ class WeChatPlugin {
         }
       }
       return { bytes: null, failed: "image_unknown_format" };
+    }
+
+    if (item.kind === "file") {
+      // 微信收到的文件是**明文落盘**的（msg/file/YYYY-MM/原文件名），不加密、不用下载。
+      // toDelivery 已经把盘上那份的路径找好放进 item.localPath 了，这里只把字节读出来交给
+      // 共用层去落仓（跟图片/语音同一条边界：取字节归插头，落仓/命名/嗅 MIME 归共用层）。
+      const src = item.localPath || "";
+      if (!src) return { bytes: null, failed: "file_not_downloaded" };
+      const fs = require("fs");
+      let st;
+      try { st = fs.statSync(src); } catch { return { bytes: null, failed: "file_not_downloaded" }; }
+      if (!st.isFile()) return { bytes: null, failed: "file_not_downloaded" };
+      // 读之前先按 stat 挡超大文件——别把一个几 G 的东西整个读进内存（文件仓那头虽然也有
+      // 上限，但它是读完字节之后才拦，等于白读一遍）。
+      if (st.size > this.fileMaxBytes) {
+        return { bytes: null, failed: "file_too_large", detail: st.size + " 字节 > 上限 " + this.fileMaxBytes };
+      }
+      let bytes;
+      try { bytes = fs.readFileSync(src); } catch (e) { return { bytes: null, failed: "file_read_failed", detail: e.message }; }
+      if (!bytes.length) return { bytes: null, failed: "file_empty" };
+      return { bytes, hintName: item.fileName || path.basename(src) };
     }
 
     if (item.kind === "voice") {
@@ -459,6 +551,19 @@ class WeChatPlugin {
       return { nativeId: null, sentAs: "call_ended" };
     }
 
+    if (intent === "send_file") {
+      if (!this.fileSender) throw notSent("微信这条还没接文件发送器（fileSender）");
+      // 文件路径从他递进来的几种形状里挑（跟发语音/发图一样，认 asset / toolArgs / extras）。
+      // send_file 工具的参数就叫 filePath（见 src/gate/tools/send_file.js）。
+      const file = (extras && (extras.filePath || extras.file_path))
+        || (toolArgs && (toolArgs.filePath || toolArgs.file_path))
+        || (asset && (asset.filePath || asset.path)) || "";
+      // 发不出去就**抛**（出闸记成没送达），绝不退成发一行字——那样他以为文件出去了，她那头什么也没有。
+      if (!file) throw notSent("没拿到要发的文件路径——先确认文件在不在、路径对不对");
+      await this.fileSender({ chatId, filePath: file, operationId });
+      return { nativeId: null, sentAs: "file", filePath: file };
+    }
+
     if (intent === "send_voice") {
       if (!this.voiceSender) throw notSent("微信这条还没接语音发送器（voiceSender）");
       // 他自己递了音频（唱歌：歌做好了直接当语音条发）就用他的 ——
@@ -486,6 +591,16 @@ module.exports = { WeChatPlugin, zstdUnpack, splitLocalType, APPMSG_LABEL, parse
  * 自我介绍（2026-09-18 插头插件化）—— 她自己的真实微信（读库收 / 无障碍发）。
  * ⚠️ 跟 `wechat-bot`（im.bot 上那个 bot 账号）**不是一条腿**，见 weixin-bot.js。
  */
+/** "id=名字,id=名字" → { id: 名字 }（GATE_WECHAT_GROUP_TITLES 用） */
+function parsePairs(raw) {
+  const out = {};
+  for (const part of String(raw || "").split(",")) {
+    const i = part.indexOf("=");
+    if (i > 0) out[part.slice(0, i).trim()] = part.slice(i + 1).trim();
+  }
+  return out;
+}
+
 module.exports.leg = {
   name: "wechat",
   slot: "wechatA11y",
@@ -524,6 +639,10 @@ module.exports.leg = {
       keysFile: env.GATE_WECHAT_KEYS_FILE,
       whitelistFile: env.GATE_WECHAT_WHITELIST_FILE,
       ownerWxid: env.GATE_OWNER_WECHAT_ID || "",
+      defaultTarget: env.GATE_WECHAT_TARGET || "",
+      groupTitles: parsePairs(env.GATE_WECHAT_GROUP_TITLES),
+      selfNames: String(env.GATE_WECHAT_SELF_NAMES || "").split(",").map((x) => x.trim()).filter(Boolean),
+      botIds: String(env.GATE_WECHAT_BOT_IDS || "").split(",").map((x) => x.trim()).filter(Boolean),
       filesRoot: env.GATE_WECHAT_FILES_ROOT || media.filesRoot || "",   // 环境变量可覆盖；默认从密钥文件的库目录推
       python: env.GATE_WECHAT_PYTHON || "python3",
       // 贴纸本给了，但微信只认本地图 —— 小熊那包是 TG 上建的、只有 file_id，

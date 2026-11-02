@@ -94,6 +94,19 @@ function imgMd5FromXml(xml) {
 }
 
 /**
+ * 从图片消息 XML 里挑 `cdnthumblength` —— **缩略图明文的字节数**。
+ *
+ * 2026-10-23 实测（26 条真实图片消息，0 反例）：
+ * 盘上 `<base>_t.dat` 解密后的长度**恰好等于** XML 里的 `cdnthumblength`。
+ * 这是「md5 对不上时」唯一一条还能精确认人的绳子 —— 见 locateImageDat 的 ①′。
+ * 挑不到返回 0（= 判不了，别拿 0 当"长度 0"用）。
+ */
+function thumbLengthFromXml(xml) {
+  const m = /\bcdnthumblength="(\d+)"/.exec(String(xml || ""));
+  return m ? Number(m[1]) : 0;
+}
+
+/**
  * 定位并解出一条图片消息对应的 `_h.dat`（高清原图）。
  *
  * 目录规律（2026-09-17 实测）：`<attachRoot>/<talkerMd5>/<YYYY-MM>/Img/<hash>_h.dat`，
@@ -110,9 +123,10 @@ function imgMd5FromXml(xml) {
  * 解出来的字节可能是标准图（jpeg/png…），也可能是 wxgf（中间版）——**本函数不管翻译**，
  * 原样把解密后的容器字节交出去，由调用方 sniff 再决定要不要 wxgf→jpg（那步是异步）。
  *
+ * @param {number} [o.thumbLength] XML 的 `cdnthumblength`。走 ①′ 时用它认人 —— 见下面。
  * @returns {{bytes:Buffer, datPath:string, variant:string}|null}
  */
-function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileNameHint = "", fileNameHints = [] }) {
+function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileNameHint = "", fileNameHints = [], thumbLength = 0 }) {
   if (!attachRoot || !imageKey) return null;
   const talker = String(table || "").replace(/^Msg_/, "");
   const d = new Date((Number(createTime) || 0) * 1000);
@@ -134,6 +148,23 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
     return null;
   };
 
+  /**
+   * 这个 base 的缩略图长度跟这条消息的 `cdnthumblength` 对得上吗。
+   * @returns {boolean|null} true=就是它 / false=不是它 / null=判不了（没给长度，或缩略图不在盘上）
+   */
+  const thumbVerdict = (base) => {
+    const want = Number(thumbLength) || 0;
+    if (!want) return null;
+    for (const m of months) {
+      const p = path.join(attachRoot, talker, m, "Img", base + "_t.dat");
+      let bytes;
+      try { bytes = decryptDatV2(fs.readFileSync(p), imageKey); }
+      catch { continue; }
+      return bytes.length === want;
+    }
+    return null;
+  };
+
   // —— ① hardlink 按 XML.md5 给了文件名 ——
   if (fileNameHint) {
     // hint 给了却找不到文件（还没下下来）——不再瞎扫别的 md5，如实报空
@@ -146,12 +177,33 @@ function locateImageDat({ table, md5, createTime, attachRoot, imageKey, fileName
   // 9-20 19:37 那张就是：XML md5 15f8…，盘上 6e45….dat（md5 9230…），桥报「没下载」。
   // 候选来自 hardlink.db 里 modify_time 落在消息 create_time 附近的行（调用方按时间差排好序），
   // 这里只认**这个会话目录下真存在**的那个；一个都不在就继续往下走。
+  //
+  // ⚠️ 2026-10-23 修：光按"时间最近"取第一个**会把连发的照片认成同一张**。
+  // 10-22 20:34 她连发两张（local_id 1329/1330，隔 1 秒），两条的候选表一模一样
+  // （`073afb….dat` 和 `536464….dat`，按时间差排序完全同序），于是两条都取了第一个
+  // ——落盘的文件按内容哈希命名，同内容只有一份，账本里两条事件的 filePath 一字不差，
+  // 他看见同一张两遍，她第二张照片等于丢了。
+  //
+  // 真正能认人的绳子是 `cdnthumblength`：XML 里写的缩略图明文字节数，
+  // 跟盘上 `<base>_t.dat` 解出来的长度**恰好相等**（26 条真实消息 0 反例）。
+  // 所以候选分三档，只按这个顺序取：
+  //   verified  缩略图长度对得上 → 就是它（matchedBy: "thumb"）
+  //   unknown   没给长度 / 缩略图还没下下来 → 判不了，退回老的"时间最近"（matchedBy: "time"）
+  //   rejected  缩略图在、长度不对 → **永不采用**（这就是堵住上面那个洞的那一脚）
   const seen = new Set();
+  const unknown = [];
   for (const h of Array.isArray(fileNameHints) ? fileNameHints : []) {
     const base = String(h || "").replace(/(_[ht])?\.dat$/i, "");
     if (!base || seen.has(base)) continue;
     seen.add(base);
-    const hit = tryBase(h);
+    const verdict = thumbVerdict(base);
+    if (verdict === false) continue;                 // 明确不是这条的，跳过
+    if (verdict === null) { unknown.push(base); continue; }
+    const hit = tryBase(base);
+    if (hit) return { ...hit, matchedBy: "thumb" };
+  }
+  for (const base of unknown) {
+    const hit = tryBase(base);
     if (hit) return { ...hit, matchedBy: "time" };
   }
 
@@ -321,7 +373,7 @@ function makeVoiceLookup({ mediaDb, key, sqlcipherBin = "sqlcipher" }) {
 }
 
 module.exports = {
-  decryptDatV2, isDatV2, sniffImage, imgMd5FromXml, locateImageDat,
+  decryptDatV2, isDatV2, sniffImage, imgMd5FromXml, thumbLengthFromXml, locateImageDat,
   isWxgf, decodeWxgf, makeImageFileLookup, makeImageFilesByTime,
   decodeWechatSilk, isWechatSilk, makeVoiceLookup,
 };

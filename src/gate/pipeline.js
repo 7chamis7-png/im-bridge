@@ -100,7 +100,7 @@ function envelopeFromEvent(event, { producer = "" } = {}) {
  */
 function makePipeline({ plugins, inbound, outbound, box, router, media = null, undelivered = null,
   groups = null, owner = "alice", binding = null, enabled = () => true, log = () => {},
-  closingNote = null, retry = {} }) {
+  closingNote = null, retry = {}, merge = {} }) {
   if (!plugins || typeof plugins.get !== "function") throw new Error("主循环要一份「渠道名 → 插头」的表");
   if (!box) throw new Error("主循环要一个盒子（没有盒子，话送不进去也拿不出来）");
   if (!router) throw new Error("主循环要一个路由（没有路由，他的话不知道发给谁）");
@@ -143,7 +143,7 @@ function makePipeline({ plugins, inbound, outbound, box, router, media = null, u
   const held = [];
   const stats = { in: 0, blocked: 0, out: 0, silent: 0, heldCount: 0, failed: 0 };
   const queue = makeTurnQueue({
-    file: path.join(inbound.store.root, "turns.json"), box, binding, enabled, log, retry,
+    file: path.join(inbound.store.root, "turns.json"), box, binding, enabled, log, retry, merge,
     // 重启后「提交了但没等到回执」的那些，用出站账本当证据自动认掉能认的那一半：
     // 出站账本里只要有这一轮的操作，就说明盒子对这一轮产出过回复（`outbox.create`
     // 发生在 onReply → deliver 的路上）。查不到就原样留着等人核对，绝不反向判「没跑」。

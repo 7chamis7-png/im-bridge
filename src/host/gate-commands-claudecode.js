@@ -86,6 +86,15 @@ function buttonFor(cmd, m, { current = "" } = {}) {
 
 const engineName = (e) => registry.ENGINE_LABEL[e] || e || "?";
 
+/** /engine 第一层按厂商分组（2026-10-28 Alice：「改成 gpt/deepseek，点进去显示详细模型」）。按 id 认厂商，认不出退回引擎名。 */
+function vendorOf(m) {
+  const id = String((m && m.id) || "").toLowerCase();
+  if (id.startsWith("claude")) return "Claude";
+  if (/^(gpt|o\d|codex)/.test(id)) return "GPT";
+  if (id.startsWith("deepseek")) return "DeepSeek";
+  return engineName(m && m.engine);
+}
+
 /** /engine 的回执：新模型、窗口、垫了多少轮、降级了什么、第一轮全量重算。 */
 function describeSwitch(rc, closing = "", r = null) {
   if (!rc) return `换了，但盒子没给回执（看 nova-box 日志）。${closing || ""}`;
@@ -207,15 +216,27 @@ function registerClaudeCodeCommands(commands, { runtime, box = null, workspaceRo
     const parts = String(rest || "").trim().split(/\s+/).filter(Boolean);
     const now = parts.length > 1 && ["now", "现在", "立刻"].includes(parts[parts.length - 1].toLowerCase());
     const id = now ? parts.slice(0, -1).join(" ") : parts.join(" ");
-    if (!id) {
+    if (!id || id.startsWith("@")) {
       const head = `现在：${engineName(cur.engine)} · ${cur.model || "(默认)"}`;
       if (!reg.exists) return { text: `${head}\n（没有模型登记表 ${reg.file || ""}，换不了引擎）` };
       if (!reg.ok) return { text: `${head}\n模型登记表读不了：${reg.errors[0] || "?"}` };
       const others = reg.models.filter((m) => m.engine !== cur.engine);
-      const buttons = others.map((m) => buttonFor(COMMAND_NAMES.engine, m)).filter(Boolean);
-      return { text: `${head}\n` + (others.length
-        ? `换到别家 = 一次换舱（等这一轮说完、收尾、新舱第一轮全量重算）。点一个，或者 /${COMMAND_NAMES.engine} <模型> now 先叫停再换。`
-        : "登记表里没有别家的模型。"), buttons };
+      if (!others.length) return { text: `${head}\n登记表里没有别家的模型。` };
+      if (!id) {
+        // 第一层：只列厂商，点进去才是具体模型
+        const vendors = [...new Set(others.map(vendorOf))];
+        const buttons = vendors.map((v) => ({ text: `${v} ›`, callback_data: `/${COMMAND_NAMES.engine} @${v}` }))
+          .filter((x) => Buffer.byteLength(x.callback_data, "utf8") <= 64);
+        return { text: `${head}\n换到别家 = 一次换舱（等这一轮说完、收尾、新舱第一轮全量重算）。先选哪家：`, buttons };
+      }
+      const vendor = id.slice(1);
+      const list = others.filter((m) => vendorOf(m) === vendor);
+      if (!list.length) return { ok: false, text: `登记表里没有「${vendor}」家的模型。`, buttons: [{ text: "‹ 返回", callback_data: `/${COMMAND_NAMES.engine}` }] };
+      const lines = list.map((m) => `· ${m.label || m.id}（${m.id}）窗口 ${Number(m.window || 0).toLocaleString()}`
+        + `${m.vision ? " · 能识图" : " · 不识图"}${m.billing === "api" ? " · 按量计费" : " · 订阅"}`);
+      const buttons = [...list.map((m) => buttonFor(COMMAND_NAMES.engine, m)).filter(Boolean),
+        { text: "‹ 返回", callback_data: `/${COMMAND_NAMES.engine}` }];
+      return { text: `${head}\n${vendor}：\n${lines.join("\n")}\n点一个就换（或 /${COMMAND_NAMES.engine} <模型> now 先叫停再换）。`, buttons };
     }
     if (cur.pinned) return { ok: false, text: "GATE_MODEL 钉死了模型，换不了引擎 —— 先把它从 env 里去掉（默认模型改由 models.json 的 default 给）。" };
     const why = gateChecks(reg, id);

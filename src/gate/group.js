@@ -55,11 +55,13 @@ const BOT_MAX_WAKES = 3;
  *   —— 撞了就是「放行了 A 平台的群，等于把 B 平台同号的群也放进来」。
  * @param {string[]} [o.alwaysWake]   这些群里每条都叫醒他（同样带渠道前缀）
  * @param {string[]} [o.wakeNames]    叫醒词，默认 WAKE_NAMES
- * @param {number} [o.maxUnread]      一个群最多攒多少条（攒爆了丢最旧的，不是丢最新的）
+ * @param {number} [o.maxUnread]      一个群最多攒多少条（攒爆了丢最旧的，不是丢最新的）。
+ *   2026-10-29 Alice定 50（原 200）：攒的整批叫醒时全给他，太多一轮太重。
+ *   ⚠️ 丢掉的那些没进过他的轮，所以也不进群冷层。
  * @param {function} [o.now]
  */
 function makeGroupGate({ allowed = [], alwaysWake = [], wakeNames = WAKE_NAMES,
-  maxUnread = 200, now = () => Date.now(), stateFile = "", file = "" } = {}) {
+  maxUnread = 50, now = () => Date.now(), stateFile = "", file = "" } = {}) {
   const allowSet = new Set(allowed.map(String));
   const wakeSet = new Set(alwaysWake.map(String));
   const persistenceFile = String(stateFile || file || "").trim();

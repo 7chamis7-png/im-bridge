@@ -136,8 +136,17 @@ class GateStore {
 
   registerInbound(delivery, verdict) {
     const key = GateStore.nativeKey(delivery);
+    let reusedFrom = "";
     if (delivery.nativeId && this.nativeIndex.has(key)) {
-      return { event: this.nativeIndex.get(key), duplicate: true };
+      const prior = this.nativeIndex.get(key);
+      // 2026-10-23：平台编号会被复用。微信 10-07 搬机重登后库重建、rowid 从 1 重新数，
+      // 爬回 9 月的区间就跟老事件撞号。老代码撞上直接 return 老事件 —— 于是一个月前的
+      // 旧消息被当成她刚说的话投给他（实测一晚投出两条一个多月前的旧消息
+      // ），她真正说的那两条整条丢掉，连事件都没登记。
+      // 所以撞号时再比消息自己的时间：同一时刻才是真重传，不同时刻就是两条不同的消息。
+      const a = String(prior.receivedAt || ""), b = String(delivery.receivedAt || "");
+      if (!a || !b || a === b) return { event: prior, duplicate: true };
+      reusedFrom = prior.eventId;
     }
     this.state.eventCount += 1;
     const ev = {
@@ -150,6 +159,7 @@ class GateStore {
       chatType: delivery.chatType || "private",
       nativeId: delivery.nativeId || "",
       receivedAt: delivery.receivedAt || nowIso(),
+      ...(reusedFrom ? { nativeIdReusedFrom: reusedFrom } : {}),
       registeredAt: nowIso(),
       processing: delivery.processing || [],
       text: delivery.text || "",

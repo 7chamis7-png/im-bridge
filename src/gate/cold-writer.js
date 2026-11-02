@@ -120,4 +120,51 @@ class ColdWriter {
   }
 }
 
-module.exports = { ColdWriter };
+
+/**
+ * 群聊单独落冷层（2026-10-29 Alice：「群聊落单独的冷层吧」）。
+ *
+ * 主冷层（cold.jsonl）只收她和他的私聊 —— forge 拿它垫暖尾巴、IB 拿它挖、面板翻的也是它。
+ * 群里别人的话（亲戚、Iris）不该混进去：换舱时会被当成「她和他的真实对话」塞回他的会话。
+ * 所以按聊天分流：群 → `<主冷层目录>/cold-groups/<渠道>/<群id>.jsonl`，一个群一个文件，
+ * 格式跟主冷层一模一样（四个字段），写手规矩一样（只追加、去重、铁律 4）。
+ *
+ * 认群：入站看事件的 chatType；出站看这一轮发往哪个聊天（turn.inboundEvent 的 channel/chatId）
+ * —— 微信群 id 以 `@chatroom` 结尾，TG 群 id 是负数。认不出的一律当私聊（落主冷层，跟以前一样）。
+ */
+function isGroupChat(chat) {
+  if (!chat) return false;
+  if (chat.chatType) return chat.chatType !== "private";
+  const id = String(chat.chatId || chat.chat_id || "");
+  const ch = String(chat.channel || chat.platform || "");
+  if (ch === "wechat") return id.endsWith("@chatroom");
+  if (ch === "telegram") return id.startsWith("-");
+  return false;
+}
+
+class RoutedColdWriter {
+  constructor({ file, groupsDir = "" } = {}) {
+    this.main = new ColdWriter({ file });
+    this.file = file;
+    this.groupsDir = groupsDir || path.join(path.dirname(file), "cold-groups");
+    this.groups = new Map();
+  }
+  /** 群冷层文件路径（面板/排查用）。 */
+  groupFile(channel, chatId) {
+    const safe = (x) => String(x || "").replace(/[^A-Za-z0-9@._-]/g, "_");
+    return path.join(this.groupsDir, safe(channel), safe(chatId) + ".jsonl");
+  }
+  #writerFor(chat) {
+    if (!isGroupChat(chat)) return this.main;
+    const f = this.groupFile(chat.channel || chat.platform, chat.chatId || chat.chat_id);
+    if (!this.groups.has(f)) this.groups.set(f, new ColdWriter({ file: f }));
+    return this.groups.get(f);
+  }
+  /** 跟 ColdWriter.write 一样，多一个 `chat`（出站给）；入站从 ev 自己认。 */
+  write({ recordId, role, ev, text, chat }) {
+    const w = this.#writerFor(chat || ev);
+    return w.write({ recordId, role, ev, text });
+  }
+}
+
+module.exports = { RoutedColdWriter, isGroupChat, ColdWriter };

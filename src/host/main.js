@@ -194,6 +194,8 @@ function readConfig(env = process.env) {
     groupsAlwaysWake: list("GATE_GROUPS_ALWAYS_WAKE"),
     // 群里叫醒他的词（GATE_GROUP_WAKE_NAMES，没给 = [他的名字, 她的名字]，见 core/names.js）
     groupWakeNames: groupWakeNames(env),
+    // 一个群最多攒几条未读，叫醒时整批给他；超了丢最旧的（2026-10-29 Alice定 50）
+    groupMaxUnread: Number(env.GATE_GROUP_MAX_UNREAD) > 0 ? Number(env.GATE_GROUP_MAX_UNREAD) : 50,
     // 群轮挂在群名下，配置键 `telegram:group:<id>`
     groupNames: parseGroupNames(env.GATE_GROUP_NAMES || ""),
     coldFile: env.GATE_COLD_FILE || path.join(root, "cold.jsonl"),
@@ -318,7 +320,9 @@ function parseGroupNames(raw) {
   const out = {};
   for (const part of String(raw).split(",")) {
     const [id, name] = part.split("=").map((s) => (s || "").trim());
-    if (id && name) out["telegram:group:" + id] = name;
+    // 2026-10-29：微信群写成 `wechat:xxx@chatroom=名字`；不带前缀的照旧当 TG 群
+    const m = /^(wechat|telegram):(.+)$/.exec(id || "");
+    if (id && name) out[(m ? m[1] : "telegram") + ":group:" + (m ? m[2] : id)] = name;
   }
   return out;
 }
@@ -405,6 +409,11 @@ async function assemble({ cfg, backend, runtime, box, remoteBox = null }) {
       baseMs: Number(process.env.GATE_TURN_RETRY_BASE_MS) || 0,
       capMs: Number(process.env.GATE_TURN_RETRY_CAP_MS) || 0,
     }).filter(([, v]) => v > 0)),
+    // 2026-11-01 Alice定：她连着发的（字/图/语音）3 秒内没新的就投，有新的就合成一轮。0 = 关。
+    turnMerge: {
+      windowMs: process.env.GATE_MERGE_WINDOW_MS === undefined ? 3000 : Number(process.env.GATE_MERGE_WINDOW_MS) || 0,
+      maxWaitMs: Number(process.env.GATE_MERGE_MAX_WAIT_MS) || 30_000,
+    },
     enforceEnabled: true,
     plugins: pluginSlots,
     identities: {
@@ -417,7 +426,8 @@ async function assemble({ cfg, backend, runtime, box, remoteBox = null }) {
     files: { gateEnabled: cfg.gateEnabledFile },
     preferredRoute: { platform: "telegram", chat_id: cfg.preferredChatId },
     groups: cfg.groupsAllowed.length
-      ? { allowed: cfg.groupsAllowed, alwaysWake: cfg.groupsAlwaysWake, wakeNames: cfg.groupWakeNames }
+      ? { allowed: cfg.groupsAllowed, alwaysWake: cfg.groupsAlwaysWake, wakeNames: cfg.groupWakeNames,
+        maxUnread: cfg.groupMaxUnread }
       : null,
     owner: cfg.ownerName,
     log,
@@ -610,6 +620,15 @@ async function main() {
       bindingKey: cfg.bindingKey,
       workspaceRoot: cfg.workspaceRoot,
       fallbackModel: cfg.model,
+      // 跟 /model 回执（gate-commands-claudecode.js current()）同一个来源，别再各算各的
+      getRequested: () => {
+        const d = (typeof runtime.describe === "function" ? runtime.describe() : null) || {};
+        if (d.model) return d.model;
+        const reg = require("../box/model-registry");
+        const env = { ...process.env, GATE_ROOT: cfg.root };
+        const r = reg.loadModelRegistry({ file: reg.modelsFile(env), env });
+        return r && r.ok ? r.default : "";
+      },
       stateFile,
       notify: push,
       log,
@@ -629,6 +648,25 @@ async function main() {
       };
     }
 
+    // 掉档自动拨回（2026-10-28 Alice：「自动请求fable吧」）。提醒器本身只推不动，
+    // 拨回放在这儿：这一轮实际答的不是请求的那个（同一家 claude），就替她按一次 /model <请求的>，
+    // 跟她手动按完全同一条口（runtime.setModelForWorkspace），下一轮生效。
+    // 注意：Claude Code 会把这次 /model 记进 transcript，他看得见（10-27 实测）。
+    // GATE_AUTO_REREQUEST=0 关掉。
+    const { bareModel } = require("./model-fallback-alert");
+    function autoRerequest(actual) {
+      try {
+        if (String(process.env.GATE_AUTO_REREQUEST || "1") === "0") return;
+        const d = (typeof runtime.describe === "function" ? runtime.describe() : null) || {};
+        const wanted = String(d.model || "").trim();
+        const a = bareModel(actual), w = bareModel(wanted);
+        if (!a || !w || a === w || !a.startsWith("claude-") || !w.startsWith("claude-")) return;
+        log(`[掉档提醒] 自动拨回：实际 ${actual} → 再请求 ${wanted}`);
+        Promise.resolve(runtime.setModelForWorkspace({ workspaceRoot: cfg.workspaceRoot, model: wanted }))
+          .catch((err) => log("[掉档提醒] 自动拨回失败（不挡这一轮）：" + ((err && err.message) || err)));
+      } catch (err) { log("[掉档提醒] 自动拨回出错（不挡这一轮）：" + ((err && err.message) || err)); }
+    }
+
     // turnId -> 这一轮见没见过「真答上来的」那句话。没见过就没有实测模型可比——
     // 要么是他没说话（silent），要么整轮是合成消息（额度用完 / 解析失败那种），
     // 拿 fullness().model 去比会读到上一轮的旧值，把这轮错怪成掉档（见文件头「两种不对」）。
@@ -646,6 +684,7 @@ async function main() {
         if (turnId && !e.failed && genuineSeenByTurn.has(turnId)) {
           const actual = (box.fullness() || {}).model || "";
           alerter.onModelObserved({ actual, turnId, at: e.at });
+          autoRerequest(actual);
         }
         if (turnId) genuineSeenByTurn.delete(turnId);
       } catch (err) { log("[掉档提醒] onTurnDone 处理出错（不挡这一轮）：" + ((err && err.message) || err)); }

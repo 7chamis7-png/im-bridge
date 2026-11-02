@@ -46,6 +46,16 @@ function loadConfig(env = process.env) {
     // ——— 出图（老 config.js 113-118 行，一字不差的回退顺序）———
     imageApiKey,
     imageApiBaseUrl: text(env, 'NOVA_IMAGE_API_BASE_URL') || text(env, 'OPENAI_BASE_URL') || 'https://api.openai.com/v1',
+    // ——— codex 后端出图（2026-10-26 加）———
+    //   第三家供应商：codex CLI 用的那条非公开接口 chatgpt.com/backend-api/codex/images/generations，
+    //   拿 ChatGPT 订阅 OAuth token 画 gpt-image，算订阅额度、不花 API 钱。
+    //   触发任一即走 codex：① NOVA_IMAGE_PROVIDER=codex；② key 写成 `codex:` 或 `codex:/path/auth.json`。
+    //   token **只读**：从 auth.json 读 tokens.access_token / account_id，绝不回写、绝不触发刷新
+    //   （刷新由别人的 codex 进程管，我们蹭新的）。默认读 /root/.codex/auth.json。
+    imageProvider: text(env, 'NOVA_IMAGE_PROVIDER'),
+    imageCodexAuthFile: text(env, 'NOVA_IMAGE_CODEX_AUTH_FILE') || '/root/.codex/auth.json',
+    imageCodexBaseUrl: text(env, 'NOVA_IMAGE_CODEX_BASE_URL') || 'https://chatgpt.com/backend-api/codex',
+    imageCodexVersion: text(env, 'NOVA_IMAGE_CODEX_VERSION') || '0.163.0',
     // Replicate 的 key（r8_…）默认 flux-schnell；OpenAI 兼容的默认 gpt-image-2
     imageModel: text(env, 'NOVA_IMAGE_MODEL') || (imageApiKey.startsWith('r8_') ? 'black-forest-labs/flux-schnell' : 'gpt-image-2'),
     imageOutputDir: text(env, 'NOVA_IMAGE_OUTPUT_DIR') || path.join(stateDir, 'generated-images'),

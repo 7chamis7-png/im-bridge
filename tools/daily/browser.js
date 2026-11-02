@@ -52,7 +52,7 @@ function resolveChromePath({ explicit = '', homeDir = require('node:os').homedir
 }
 
 /** 起一个用完即扔的无头浏览器，挡掉图片/字体/样式，交一页给 fn。无论成败都关掉。 */
-async function withPage(fn, { executablePath } = {}) {
+async function withPage(fn, { executablePath, locale = 'zh-CN' } = {}) {
   const { chromium } = require('playwright-core');
   const browser = await chromium.launch({
     headless: true,
@@ -60,7 +60,7 @@ async function withPage(fn, { executablePath } = {}) {
     args: ['--no-sandbox', '--disable-dev-shm-usage'],
   });
   try {
-    const ctx = await browser.newContext({ userAgent: UA, locale: 'zh-CN', viewport: { width: 1280, height: 900 } });
+    const ctx = await browser.newContext({ userAgent: UA, locale, viewport: { width: 1280, height: 900 } });
     await ctx.route('**/*', (route) => (BLOCKED_RESOURCES.has(route.request().resourceType())
       ? route.abort() : route.continue()));
     const page = await ctx.newPage();
@@ -84,12 +84,26 @@ function decodeDdgLink(href) {
 
 /** 搜：只要有标题的结果，截 limit 条，每条 { title, link }。 */
 async function search(query, limit = DEFAULT_LIMIT, opts = {}) {
+  // ⚠️ locale 必须压成 en-US（2026-10-23 keeper 查 nova_browse「搜索回空」查出来的）：
+  // DDG 的 /html/ 端点对**中文 locale**（zh-CN / zh-TW）一律回 bot 校验页
+  //   —— HTTP 202、0 个 a.result__a，看着就跟"没搜到"一模一样。
+  // 实测 12/12 确定性：zh-CN/zh-TW → 202+0 条；en-US 或不给 → 200+10 条，
+  // 跟搜的词是不是中文无关（搜"李白 将进酒"照样给中文结果）。
+  // 只压搜索这一跳；open() 还是 zh-CN，中文站该出中文正文。
   return withPage(async (page) => {
     await page.goto(`${SEARCH_URL}${encodeURIComponent(query)}`, { waitUntil: 'domcontentloaded' });
     const raw = await page.$$eval('a.result__a', (as) => as.map((a) => ({
       title: a.innerText.trim(), link: a.getAttribute('href') || '' })));
-    return raw.filter((r) => r.title).slice(0, limit).map((r) => ({ title: r.title, link: decodeDdgLink(r.link) }));
-  }, opts);
+    const out = raw.filter((r) => r.title).slice(0, limit).map((r) => ({ title: r.title, link: decodeDdgLink(r.link) }));
+    // 0 条 = 要么真没结果，要么又被拦了。拦了就**报错**，别再冒充"没搜到"
+    // （这个病能躺这么久，就因为它一直假装成空结果）。
+    if (!out.length) {
+      const blocked = await page.evaluate(() => /bots use DuckDuckGo|anomaly/i.test(document.body ? document.body.innerText : '')
+        || !!document.getElementById('anomaly-modal'));
+      if (blocked) throw new Error('搜索被 DuckDuckGo 拦了（bot 校验页，不是没结果）—— 换搜索引擎或改 locale');
+    }
+    return out;
+  }, { ...opts, locale: 'en-US' });
 }
 
 /** 打开一页：{ title, text（≤4000 字）, links（≤limit 条，按 href 去重） }。 */

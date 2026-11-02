@@ -25,12 +25,20 @@ const path = require("path");
 
 function makeA11ySenders(env, log = () => {}) {
   const script = env.GATE_WECHAT_SENDER;
+  // 2026-10-29 群：发给哪个窗口按 chatId 算（插头注入 resolver：私聊 = GATE_WECHAT_TARGET，群 = 群名）。
+  // 没注入时跟以前一模一样，永远是 GATE_WECHAT_TARGET。拨号/挂断只打给她，不跟着变。
   const target = env.GATE_WECHAT_TARGET;
+  let resolveTarget = () => target;
+  const targetOf = (chatId) => {
+    const t = String(resolveTarget(chatId) || "");
+    if (!t) throw new Error("微信出站：算不出发给哪个聊天窗，没敢发");
+    return t;
+  };
   const lock = env.GATE_WECHAT_SEND_LOCK;
   const sendLog = env.GATE_WECHAT_SEND_LOG || "";
   const python = env.GATE_WECHAT_PYTHON || "python3";
 
-  const run = (extraArgs, arg, killSec, timeoutMs) => new Promise((resolve, reject) => {
+  const run = (extraArgs, arg, killSec, timeoutMs, to = target) => new Promise((resolve, reject) => {
     const tail = sendLog ? ` >> ${JSON.stringify(sendLog)} 2>&1` : " >/dev/null 2>&1";
     const guard = `exec 9>${JSON.stringify(lock)}; `
       + `flock -w 60 9 || { echo "等微信发送锁超时（另一条还在发）" >&2; exit 1; }; `;
@@ -38,7 +46,7 @@ function makeA11ySenders(env, log = () => {}) {
       + `timeout -k 5 ${killSec} ${JSON.stringify(python)} -u ${JSON.stringify(script)} `
       + `${extraArgs} "$1"${tail}`;
     execFile("/bin/sh", ["-c", cmd, "sh", arg],
-      { timeout: timeoutMs, env: { ...process.env, LINUX_WX_TARGET: target } },
+      { timeout: timeoutMs, env: { ...process.env, LINUX_WX_TARGET: to } },
       (err) => {
         // 发不出去要**抛**：出闸会记成没送达，绝不当成发过了
         if (err) return reject(new Error("微信无障碍出站失败：" + ((err && err.message) || err)));
@@ -77,7 +85,8 @@ function makeA11ySenders(env, log = () => {}) {
      * 所以：点录音 → 把合成好的音频放进假麦克风 → 点发送。
      * 2026-09-18 实测通过，她那头收到的是真语音气泡。
      */
-    voiceSender: async ({ filePath }) => {
+    voiceSender: async ({ filePath, chatId }) => {
+      const to = targetOf(chatId);
       const t0 = Date.now();
       // paplay 只吃 wav，合成出来多半是 mp3 —— 转一道
       const src = String(filePath || "");
@@ -119,8 +128,9 @@ function makeA11ySenders(env, log = () => {}) {
           + `sleep ${Math.max(0, Math.round(cool / 1000))}`;   // 冷却，锁不放
         execFile("/bin/sh", ["-c", cmd, "sh", wav],
           { timeout: 120_000 + cool,
-            env: { ...process.env, LINUX_WX_TARGET: target,
-                   LINUX_WX_OWNER_WXID: env.GATE_OWNER_WECHAT_ID || "",
+            env: { ...process.env, LINUX_WX_TARGET: to,
+                   // 发完查库验 type=34 用的会话：群里发就验群那张表（2026-10-29）
+                   LINUX_WX_OWNER_WXID: String(chatId || "").endsWith("@chatroom") ? String(chatId) : (env.GATE_OWNER_WECHAT_ID || ""),
                    LINUX_WX_KEYS: env.GATE_WECHAT_KEYS_FILE || "",
                    // 桥进程没有 DISPLAY（它不是从桌面起的），点不到窗口
                    DISPLAY: process.env.DISPLAY || env.GATE_WECHAT_DISPLAY || ":98",
@@ -148,16 +158,29 @@ function makeA11ySenders(env, log = () => {}) {
      */
     hangUp: () => runCall(["--hangup"], "挂断", "挂断了"),
 
-    sender: async ({ text }) => {
+    setTargetResolver: (fn) => { if (typeof fn === "function") resolveTarget = fn; },
+    sender: async ({ text, chatId }) => {
       const t0 = Date.now();
-      await run("", String(text), 30, 45_000);
+      await run("", String(text), 30, 45_000, targetOf(chatId));
       log("[微信] 发出一段，用时 " + ((Date.now() - t0) / 1000).toFixed(2) + "s");
       return null;
     },
-    imageSender: async ({ filePath }) => {
+    imageSender: async ({ filePath, chatId }) => {
       const t0 = Date.now();
-      await run("--image", String(filePath), 45, 60_000);
+      await run("--image", String(filePath), 45, 60_000, targetOf(chatId));
       log("[微信] 发出一张图，用时 " + ((Date.now() - t0) / 1000).toFixed(2) + "s");
+      return null;
+    },
+    /**
+     * 发文件（pdf/word/zip/txt 这类文档，2026-10-23）。跟发图同一条路：都走 `run()`，
+     * 所以**同一把发送锁（flock）**、同一套超时。差别只在脚本里——图走剪贴板的 image/png，
+     * 文件走剪贴板的 file-uri（x-special/gnome-copied-files 或 text/uri-list），见 linux-wx-send-a11y.py。
+     * 判据照旧：发送键亮了才回车、变灰了才算发出去。
+     */
+    fileSender: async ({ filePath, chatId }) => {
+      const t0 = Date.now();
+      await run("--file", String(filePath), 45, 60_000, targetOf(chatId));
+      log("[微信] 发出一个文件，用时 " + ((Date.now() - t0) / 1000).toFixed(2) + "s");
       return null;
     },
   };

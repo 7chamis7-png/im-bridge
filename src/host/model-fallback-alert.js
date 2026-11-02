@@ -237,13 +237,19 @@ function saveState(file, state, log) {
  * @param {function} [o.log]
  */
 function makeModelFallbackAlert({ getSessionsFile = () => "", bindingKey = "", workspaceRoot = "",
-  runtimeId = "claudecode", fallbackModel = "", stateFile, notify, log = () => {} } = {}) {
+  runtimeId = "claudecode", fallbackModel = "", getRequested = null, stateFile, notify, log = () => {} } = {}) {
   if (!String(stateFile || "").trim()) throw new Error("掉档提醒要一份落盘文件，不然桥一重启就把同一段掉档再推一遍");
   if (typeof notify !== "function") throw new Error("掉档提醒要一个 notify（说给谁是宿主的事）");
 
   let state = loadState(stateFile);
 
   function currentRequested() {
+    // 2026-10-27：优先跟 /model 回执同一个来源（盒子快照 describe().model → 登记表 default）。
+    // 老路子读 sessions.json 的 bindings[..][workspaceRoot]，但工作目录从 /root/cyberboss 搬到 /root/nova 后
+    // 那里只剩旧目录的条目 → 一直读到空 → decide() 当「不知道请求谁」整段沉默，下午 26 轮 opus-5 一声没吭。
+    if (typeof getRequested === "function") {
+      try { const m = String(getRequested() || "").trim(); if (m) return m; } catch { /* 退回老路子 */ }
+    }
     let sessionsFile = "";
     try { sessionsFile = (typeof getSessionsFile === "function" ? getSessionsFile() : getSessionsFile) || ""; }
     catch { sessionsFile = ""; }

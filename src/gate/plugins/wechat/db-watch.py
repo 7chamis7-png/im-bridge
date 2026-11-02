@@ -362,12 +362,23 @@ def poll_once(db_dir: str, keys: dict[str, str], state: dict, nicks: dict[str, s
             if m["sender"] == me:
                 continue
             wxid = session_wxid_for_table(m["digest"], nicks) or m["sender"]
-            from_name = nicks.get(wxid) or nicks.get(m["sender"]) or wxid
-            # 2026-09-17：原来是 `if allow and ...`——白名单为空时整个条件短路成 False，
-            # 谁发都放行，而 bridge.js 又把 from_name 硬写成 Alice，等于别人的话被
-            # 标成她说的。去掉 `allow and`：空白名单 = 谁都不放行（fail-closed）。
-            if from_name not in allow and wxid not in allow:
-                continue
+            # 2026-10-29 群：会话是 xxx@chatroom 时，wxid 是**群**，真正说话的人在 real_sender_id
+            #（m["sender"]）。白名单只认**群 id**（不认群名：群名谁都能改）；发言人原样交出去，
+            # 认不认得她归共用层（resolveIdentity 按真实 wxid 认），这里绝不把群里的人标成她。
+            is_group = wxid.endswith("@chatroom")
+            if is_group:
+                if wxid not in allow:
+                    continue
+                member = m["sender"]
+                from_name = nicks.get(member) or member
+            else:
+                member = wxid
+                from_name = nicks.get(wxid) or nicks.get(m["sender"]) or wxid
+                # 2026-09-17：原来是 `if allow and ...`——白名单为空时整个条件短路成 False，
+                # 谁发都放行，而 bridge.js 又把 from_name 硬写成 Alice，等于别人的话被
+                # 标成她说的。去掉 `allow and`：空白名单 = 谁都不放行（fail-closed）。
+                if from_name not in allow and wxid not in allow:
+                    continue
             if not m["body"]:
                 continue
             if sink is None:
@@ -381,8 +392,13 @@ def poll_once(db_dir: str, keys: dict[str, str], state: dict, nicks: dict[str, s
                     "table": m["table"],
                     "local_id": m["local_id"],
                     "local_type": m["local_type"],
-                    "sender": wxid,
+                    "sender": member,
                     "from_name": from_name,
+                    # 群：chat 是群 id、chat_name 是群名（出站靠群名在会话列表里找那一行）；私聊 chat = 对方
+                    "chat": wxid,
+                    "chat_name": nicks.get(wxid, "") if is_group else "",
+                    "is_group": is_group,
+                    "self_name": nicks.get(me, ""),
                     "create_time": m["create_time"],
                     "raw_hex": m.get("raw_hex", ""),
                     # 语音靠它去 media_0.db/VoiceInfo 取字节。**这一层投影漏了它**，
